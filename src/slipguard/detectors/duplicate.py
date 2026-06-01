@@ -39,6 +39,8 @@ class DuplicateDetector(Detector):
             self._items.append((_norm_vendor(r.vendor_name), r.date, round(r.total, 2), r.doc_id))
 
     def _key(self, r: Receipt) -> tuple:
+        # Real extracted receipts can have an unparseable (None) date; collapse it
+        # to "" so the exact-match key still hashes instead of crashing.
         date_key = r.date.isoformat() if r.date is not None else ""
         return (_norm_vendor(r.vendor_name), date_key, round(r.total or 0.0, 2))
 

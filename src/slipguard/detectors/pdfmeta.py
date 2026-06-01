@@ -8,6 +8,7 @@ the verdict on a guess."""
 
 from __future__ import annotations
 
+from ..combine import noisy_or
 from ..forensics.pdf import inspect_pdf
 from ..models import DocumentType, FraudType, Receipt, Signal
 from .base import Detector
@@ -57,8 +58,7 @@ class PdfMetadataDetector(Detector):
                           ["pdf provenance clean (single write, no editor tags, dates aligned)"],
                           evidence)
 
-        risk = 1.0
-        for s, _ in parts:
-            risk *= 1.0 - s
-        risk = min(0.99, 1.0 - risk)
+        # Corroborating provenance signals compound (same rule as the verdict fuser),
+        # capped below 1.0 so PDF metadata alone is never stated as certainty.
+        risk = min(0.99, noisy_or(s for s, _ in parts))
         return Signal(self.name, risk, 0.9, [r for _, r in parts], evidence)

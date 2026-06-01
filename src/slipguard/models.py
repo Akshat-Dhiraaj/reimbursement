@@ -65,6 +65,10 @@ class Receipt:
     source_path: Optional[str] = None  # original document on disk (PDF/image) for provenance forensics
     image_path: Optional[str] = None
     raw_text: Optional[str] = None
+    #: per-field extraction confidence in [0,1], keyed by Receipt field name
+    #: (e.g. {"total": 0.4}). Populated by an Extractor; empty == fully trusted,
+    #: so synthetic/oracle/hand-written receipts read as confident and unchanged.
+    field_confidence: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Receipt":

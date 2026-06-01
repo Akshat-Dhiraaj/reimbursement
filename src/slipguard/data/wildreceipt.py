@@ -15,36 +15,23 @@ Get the data (not committed):
 from __future__ import annotations
 
 import json
-import re
 from datetime import date as Date
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
 
 from ..models import DocumentType, LineItem, Receipt
+from ..money import parse_money as _money  # shared US/EU-aware parser (see money.py)
 
 # label id -> field (WildReceipt class_list.txt). Only the ones we consume.
 _STORE_NAME, _DATE, _PROD_ITEM, _PROD_PRICE = 1, 7, 11, 15
 _SUBTOTAL, _TAX, _TOTAL = 17, 19, 23
 
-_MONEY_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 _DATE_FORMATS = (
     "%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%m-%d-%y",
     "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y",
     "%b %d, %Y", "%B %d, %Y", "%b %d %Y", "%d %b %Y", "%d %B %Y",
 )
-
-
-def _money(text: Optional[str]) -> Optional[float]:
-    if not text:
-        return None
-    m = _MONEY_RE.search(text)
-    if not m:
-        return None
-    try:
-        return float(m.group(0).replace(",", ""))
-    except ValueError:
-        return None
 
 
 def _parse_date(text: Optional[str]) -> Optional[Date]:
@@ -104,6 +91,12 @@ def load_receipts(root: Union[str, Path], split: str = "test") -> list[Receipt]:
         with open(path, "r", encoding="utf-8") as fh:
             for i, line in enumerate(fh):
                 line = line.strip()
-                if line:
-                    receipts.append(_record_to_receipt(json.loads(line), f"{fname}:{i}"))
+                if not line:
+                    continue
+                r = _record_to_receipt(json.loads(line), f"{fname}:{i}")
+                # Resolve the relative file_name to a real path so an image-route
+                # extractor can open the source image for the extraction benchmark.
+                if r.image_path:
+                    r.image_path = str(root / r.image_path)
+                receipts.append(r)
     return receipts

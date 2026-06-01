@@ -12,10 +12,12 @@ harness on measured performance.
 ```mermaid
 flowchart TD
     A[Raw submission<br/>PDF / photo / structured JSON] --> R{routing.route_path}
-    R -->|PDF| X[Extraction route<br/>NOT YET WIRED]
-    R -->|IMAGE| X
-    R -->|STRUCTURED| RC[Receipt<br/>normalised fields]
-    X -.planned: OCR/VLM.-> RC
+    R -->|PDF| XP[Extractor route<br/>OCR/VLM — planned]
+    R -->|IMAGE| XV[VLM extractor<br/>Qwen2-VL-2B — live]
+    R -->|STRUCTURED| SE[StructuredExtractor<br/>live]
+    SE --> RC[Receipt<br/>normalised fields]
+    XV --> RC
+    XP -.planned.-> RC
 
     RC --> D[default_detectors&#40;&#41;<br/>run each Detector independently]
 
@@ -36,12 +38,15 @@ flowchart TD
     H --> SEL[Leaderboard = the selector]
 ```
 
-**Two evaluation paths feed the design:**
+**Three evaluation paths feed the design:**
 - `eval.harness.evaluate(dataset, detectors, fuser)` → ranked `Report` (AUC,
-  per-subtype recall, FP) on a **labelled** set. This is *how methods are chosen.*
+  per-subtype recall, FP) on a **labelled** set. This is *how detectors are chosen.*
 - `eval.audit.audit_false_positives(receipts, detectors, fuser)` → FP report on a
   corpus assumed **all-legitimate** (real receipts). This measures real-world
   false-positive cost, the one thing synthetic data cannot.
+- `eval.extraction.evaluate_extractors(extractors, truths)` → field-level accuracy
+  leaderboard against the WildReceipt KIE **oracle** as ground truth. This is *how
+  extractors are chosen* — the same measured-not-opinion rule, applied to extraction.
 
 ---
 
@@ -55,12 +60,29 @@ photos are deliberately routed apart so each gets its own provenance forensics
 (PDF structure vs. image EXIF). **Only the routing decision lives here**; the
 extractors and route-specific detectors plug in behind it.
 
-### 2.2 Extraction — *not yet wired (the gap)*
-This stage turns a PDF/photo into a `Receipt`. Today only the **STRUCTURED** route
-is live (`slipguard score` reads a `Receipt` JSON); PDF/IMAGE inputs raise an
-explicit "extraction route not yet wired" error. The plan (OCR/VLM) is in
-[ROADMAP.md](ROADMAP.md). The real-data audit currently bypasses this gap by using
-WildReceipt's human KIE annotations as an **oracle extractor** (`data/wildreceipt.py`).
+### 2.2 Extraction — `extractors/` (STRUCTURED + IMAGE live; PDF pending)
+This stage turns a raw document into a `Receipt`. Every approach implements one
+**`Extractor`** contract (mirroring `Detector`): `name`, `handles` (routes), and
+`extract(path) -> Receipt`. `extractor_for(route)` picks the registered extractor,
+and `slipguard score` runs **route → extractor → detectors** uniformly. The
+dependency-free **`StructuredExtractor`** (reads a `Receipt` JSON) backs the STRUCTURED
+route; the **`QwenVLExtractor`** (`vlm_qwen.py`, default Qwen2-VL-2B-Instruct,
+apache-2.0) backs the IMAGE route — it prompts a VLM to emit the `Receipt` schema as
+JSON, loads via transformers Auto classes (any HF VLM is a swappable `--model`
+candidate), and keeps torch/transformers/PIL imports lazy so the package stays
+import-light. The **PDF route** still returns an explicit "no extractor registered"
+until an OCR/VLM PDF extractor lands (plan in [ROADMAP.md](ROADMAP.md)). Extractors are
+ranked head-to-head on field accuracy by `eval/extraction.py`; Qwen2-VL-2B currently
+scores **macro 0.725** vs the WildReceipt oracle.
+
+An extractor may set per-field confidence on the Receipt (`field_confidence`);
+`arithmetic` reads it and **abstains** when the money fields it needs were read
+below a confidence floor, so a misread no longer masquerades as fraud. The real-data
+audit uses WildReceipt's human KIE annotations as an **oracle extractor**
+(`data/wildreceipt.py`) — those fields carry no confidence, so they read as trusted,
+and the Qwen VLM does not emit per-field confidence yet either. The guard is therefore
+the *mechanism*; the audit's **0.364** arithmetic FP only drops once an extractor
+supplies low confidence on the boxes it misreads.
 
 ### 2.3 The `Receipt` contract — `models.py`
 The normalised unit every detector reads. Key fields: `vendor_name`, `date`,
@@ -102,7 +124,7 @@ irrelevant ones polluting the risk score (e.g. `tax_id` abstains on a US receipt
 
 | Detector | Reads | Flags when | Abstains when |
 |---|---|---|---|
-| **arithmetic** | line items, subtotal, tax, total | `amount ≠ qty·price`, `subtotal ≠ Σlines`, `tax ≠ rate·subtotal`, `total ≠ subtotal+tax` (tol: max(0.02, 1%)) | can't reconcile (no items and no subtotal+total) |
+| **arithmetic** | line items, subtotal, tax, total, `field_confidence` | `amount ≠ qty·price`, `subtotal ≠ Σlines`, `tax ≠ rate·subtotal`, `total ≠ subtotal+tax` (tol: max(0.02, 1%)) | can't reconcile (no items and no subtotal+total), **or** money fields below the confidence floor |
 | **tax_id** | `country`, `vendor_tax_id` | GSTIN/VAT fails format/checksum (`python-stdnum`) | unsupported country or no tax-id |
 | **date_sanity** | `date` | future date (0.92), or > 5y old (0.6, weak) | no date |
 | **duplicate** | `vendor`, `date`, `total` vs primed history | exact (vendor,date,total) match, or fuzzy vendor + same date + ~amount | no total |
@@ -119,7 +141,9 @@ Baseline **noisy-OR** over confidence-weighted signals:
 risk = 1 − Π (1 − weightedᵢ)      # skipping abstained signals
 ```
 
-Independent fraud signals compound; abstainers (weighted 0) can't move it.
+Independent fraud signals compound; abstainers (weighted 0) can't move it. The
+formula itself lives once in `combine.noisy_or` and is reused by `pdf_meta` to
+combine its own provenance sub-signals — same rule, two levels.
 Thresholds: `risk ≥ 0.85 → REJECT`, `risk ≥ 0.4 → REVIEW`, else `APPROVE`.
 Deliberately simple and **replaceable by a learned/calibrated fuser** once the
 harness gives us measured per-detector performance to fit on (see ROADMAP).
@@ -133,6 +157,12 @@ harness gives us measured per-detector performance to fit on (see ROADMAP).
   corpus and reports fused FP rate, per-detector abstain/flag rates, extractor field
   coverage, and a categorised breakdown of *why* `arithmetic` fired (lossy extraction
   vs. genuine contradiction). Backs `slipguard eval-real`.
+- `extraction.py` — `evaluate_extractors()` ranks extractors by field-level accuracy
+  (vendor / date / subtotal / tax / total / line-count) against the WildReceipt oracle:
+  the oracle Receipt is the reference, a candidate OCR/VLM extractor's output is the
+  prediction, and a field is scored only when the oracle has a value for it. Money uses
+  the same tolerance as `arithmetic`; vendor uses the duplicate detector's normaliser.
+  Backs `slipguard eval-extract`. **This is the extractor selector**, mirroring `harness.py`.
 
 ### 2.9 Forensics — `forensics/pdf.py`
 `inspect_pdf(bytes_or_path)` → `PdfProvenance` (eof_count, producer, creator,
@@ -149,8 +179,15 @@ such PDFs the string fields read `None` while the `%%EOF` count stays reliable.
 src/slipguard/
   models.py               Receipt, LineItem, Signal, Verdict, LabeledSample; enums
   routing.py              route_path / route_bytes -> DocumentType
+  combine.py              noisy_or(): the shared probability-combination rule
+  money.py                parse_money(): shared US/EU-aware money parser (oracle + VLM extractor)
   fusion.py               Fuser: noisy-OR risk + APPROVE/REVIEW/REJECT
-  cli.py / __main__.py    eval | eval-pdf | eval-real | score
+  cli.py / __main__.py    eval | eval-pdf | eval-real | eval-extract | score
+  extractors/
+    base.py               Extractor ABC (handles / can_handle / extract -> Receipt)
+    structured.py         StructuredExtractor: Receipt JSON -> Receipt (dependency-free)
+    vlm_qwen.py           QwenVLExtractor: image -> Receipt via Qwen2-VL (lazy torch/transformers)
+    __init__.py           default_extractors() + extractor_for(route) registry
   detectors/
     base.py               Detector ABC (applicable/prime/score/run/_abstain)
     arithmetic.py         line items -> subtotal -> tax -> total reconciliation
@@ -167,9 +204,10 @@ src/slipguard/
     wildreceipt.py        WildReceipt loader: KIE annotations -> Receipt (oracle, no OCR)
   eval/
     metrics.py            dependency-free precision/recall/F1/AUC/FPR
-    harness.py            evaluate() -> ranked Report (leaderboard / selector)
+    harness.py            evaluate() -> ranked Report (detector leaderboard / selector)
     audit.py              audit_false_positives() -> FP report on legitimate corpus
-tests/                    43 tests
+    extraction.py         evaluate_extractors() -> field-accuracy leaderboard vs oracle
+tests/                    81 tests
 ```
 
 ---
@@ -186,6 +224,11 @@ tests/                    43 tests
 
 Fusion and the harness consume any `Detector` uniformly; nothing else changes.
 
+**Adding an extraction approach** has the same shape: subclass `Extractor`
+(`name`, `handles`, `extract(path) -> Receipt`), set `field_confidence` for
+uncertain fields, and register it in `default_extractors()`. `extractor_for(route)`
+and `slipguard score` pick it up with no other changes.
+
 ---
 
 ## 5. Worked example — scoring one structured receipt (low-level)
@@ -193,7 +236,7 @@ Fusion and the harness consume any `Detector` uniformly; nothing else changes.
 ```
 slipguard score data/demo.json
   └─ routing.route_path(".json") = STRUCTURED
-  └─ Receipt.from_dict(json)               # normalise into the shared contract
+  └─ extractor_for(STRUCTURED).extract(path) -> Receipt   # StructuredExtractor (from_dict)
   └─ for d in default_detectors(): d.run(receipt)
         arithmetic  -> Signal(score, conf, reasons)        # reconciles fields
         tax_id      -> Signal or _abstain                  # by country

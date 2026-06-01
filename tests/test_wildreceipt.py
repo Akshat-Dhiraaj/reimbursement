@@ -2,7 +2,6 @@ import json
 from datetime import date
 
 from slipguard.data.wildreceipt import (
-    _money,
     _parse_date,
     _record_to_receipt,
     load_receipts,
@@ -15,19 +14,7 @@ def _ann(label: int, text: str) -> dict:
 
 
 # --- pure helpers ------------------------------------------------------------
-
-def test_money_parses_and_strips_commas():
-    assert _money("12,975.00") == 12975.0
-    assert _money("$5.33") == 5.33
-    assert _money("-3.50") == -3.5
-    assert _money("1,234") == 1234.0
-
-
-def test_money_none_on_garbage_or_empty():
-    assert _money("no digits here") is None
-    assert _money("") is None
-    assert _money(None) is None
-
+# (money parsing is covered in test_money.py — the oracle delegates to money.parse_money)
 
 def test_parse_date_accepts_common_formats():
     assert _parse_date("01/15/2019") == date(2019, 1, 15)
@@ -65,6 +52,24 @@ def test_record_to_receipt_maps_fields():
     assert r.source is DocumentType.IMAGE
     assert r.country == "US"           # so the GSTIN/VAT detector abstains, as it should
     assert r.tax_rate is None          # left None so arithmetic skips the rate check
+
+
+def test_record_to_receipt_parses_european_decimals():
+    # Regression: this is the real test.txt:1 (ILIO'S) row. The comma is the decimal
+    # point; the old comma-stripping parser turned 129,75 into 12975 (a 100x error that
+    # corrupted both the extraction benchmark and the FP audit). The oracle must agree
+    # with what the VLM actually reads off the image.
+    rec = {
+        "file_name": "image_files/x.jpeg",
+        "annotations": [
+            _ann(1, "ILIO'S"), _ann(1, "Restaurant"),
+            _ann(17, "Eur129,75"), _ann(19, "24,65"), _ann(23, "Eur154,40"),
+        ],
+    }
+    r = _record_to_receipt(rec, "test.txt:1")
+    assert r.subtotal == 129.75
+    assert r.tax_amount == 24.65
+    assert r.total == 154.40
 
 
 def test_record_to_receipt_tolerates_missing_fields():

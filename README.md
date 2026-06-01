@@ -44,11 +44,11 @@ never the gate**.
 | Layer | Status | Evidence |
 |---|---|---|
 | Domain models + pluggable detector framework | ✅ Done | `models.py`, `detectors/base.py` |
-| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 43 tests; synthetic leaderboard |
+| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 81 tests; synthetic leaderboard |
 | Noisy-OR fusion + eval harness + CLI | ✅ Done | `slipguard eval` |
 | PDF provenance forensics (`pdf_meta`) | ✅ Done (shallow parse) | `slipguard eval-pdf` |
 | Real-data false-positive audit | ✅ Done (WildReceipt) | `slipguard eval-real` |
-| **Extraction route (photo/PDF → fields, OCR/VLM)** | ❌ **Not started — top priority** | blocks scoring raw images |
+| **Extraction route (photo/PDF → fields, OCR/VLM)** | 🔶 **Interface + guard + benchmark + first VLM extractor (Qwen2-VL-2B) done; OCR+KIE candidate next** | `slipguard eval-extract` → macro **0.725** |
 | Image forensics (AI-generated, tamper-localization) | ❌ Not started | declared in label space only |
 | Real fraud corpora + learned fusion | ❌ Not started | data gap (see DECISIONS) |
 
@@ -62,10 +62,11 @@ nothing about real-world / AI-generated fraud. See §5.
 # Python 3.10+ (dev box 3.13). One runtime dependency: python-stdnum.
 pip install -e ".[dev]"
 
-python -m pytest                  # 43 tests
+python -m pytest                  # 81 tests
 slipguard eval                    # synthetic structured benchmark leaderboard
 slipguard eval-pdf                # synthetic PDF-provenance leaderboard
 slipguard eval-real               # real-receipt false-positive audit (needs the corpus below)
+slipguard eval-extract            # rank extractors on field accuracy vs the WildReceipt oracle
 slipguard score data/demo.json    # score one structured receipt JSON
 
 # Real corpus for eval-real (not committed; Apache-2.0):
@@ -81,12 +82,19 @@ tar -xf datasets/wildreceipt.tar -C datasets
 - **Synthetic PDF provenance** (85 samples): `pdf_meta` AUC **1.0** / recall **1.0**
   / **0** FP over 45 provenance tampers, routed to **REVIEW**. → *same caveat.*
 - **Real receipts** (WildReceipt test, 472 *genuine* receipts → every flag is a false
-  positive): fused FP **0.398**, and it is **entirely** the `arithmetic` detector,
+  positive): fused FP **0.364**, and it is **entirely** the `arithmetic` detector,
   **entirely** driven by lossy field extraction (the KIE oracle mislabels the "total"
   box / under-captures line items) — **not** arithmetic logic. `tax_id`, `pdf_meta`,
   `duplicate` produce **0** false positives. **Conclusion: a faithful field extractor
-  is the binding constraint** — which makes the OCR/VLM extraction route the next
+  is the binding constraint** — which is why the extraction route is the active
   milestone. (Full reasoning in [ROADMAP.md](ROADMAP.md).)
+- **Extraction accuracy** (Qwen2-VL-2B-Instruct vs the WildReceipt oracle, 100 receipts):
+  macro field-accuracy **0.725**, 0 extractor errors — vendor 0.880, date 0.915,
+  subtotal 0.740, tax 0.614, total 0.598, line_count 0.602. Money/line-count are the
+  weak fields, which is precisely what caps arithmetic precision. → *agreement-with-oracle,
+  not absolute truth: the oracle is itself imperfect (a money-parser bug it exposed —
+  European decimal commas read 100× too high — is now fixed, and is what moved the audit
+  FP 0.398 → 0.364).*
 
 ## 6. Repository layout
 
@@ -94,12 +102,15 @@ tar -xf datasets/wildreceipt.tar -C datasets
 src/slipguard/
   models.py        domain models + Signal/Verdict (the shared contracts)
   routing.py       classify raw input -> PDF | IMAGE | STRUCTURED
+  combine.py       noisy_or(): the shared probability-combination rule
+  money.py         parse_money(): shared US/EU-aware money parser (oracle + VLM extractor)
+  extractors/      one file per extraction approach (StructuredExtractor, Qwen2-VL) + ABC + registry
   detectors/       one file per detection method + the Detector ABC + registry
   forensics/       dependency-free PDF provenance inspector
   data/            synthetic generators + real-corpus loaders (WildReceipt)
-  eval/            metrics, ranking harness, false-positive audit
-  cli.py           `slipguard eval | eval-pdf | eval-real | score`
-tests/             43 tests
+  eval/            metrics, ranking harness, false-positive audit, extraction-accuracy benchmark
+  cli.py           `slipguard eval | eval-pdf | eval-real | eval-extract | score`
+tests/             81 tests
 ```
 
 ## 7. Licence posture (summary)

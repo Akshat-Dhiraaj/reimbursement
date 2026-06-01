@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+from .combine import noisy_or
 from .models import Decision, Signal, Verdict
 
 
@@ -19,12 +20,9 @@ class Fuser:
     reject_threshold: float = 0.85
 
     def risk(self, signals: Iterable[Signal]) -> float:
-        prod = 1.0
-        for s in signals:
-            if s.abstained:
-                continue
-            prod *= 1.0 - max(0.0, min(1.0, s.weighted))
-        return 1.0 - prod
+        # Combine each detector's confidence-weighted score; abstainers (weighted 0)
+        # are dropped so an irrelevant detector can't move the verdict.
+        return noisy_or(s.weighted for s in signals if not s.abstained)
 
     def decide(self, risk: float) -> Decision:
         if risk >= self.reject_threshold:

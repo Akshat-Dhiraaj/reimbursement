@@ -2,7 +2,9 @@
 
 > Handoff doc for transferring this project to a fresh AI session or engineer.
 > **Keep this file updated every milestone** (status, architecture, roadmap).
-> Last updated: 2026-06-01 (Milestone 2 + first real-data false-positive audit).
+> Last updated: 2026-06-01 (M2 + real-data FP audit; M2.5 extractor interface + confidence
+> guard + extraction-accuracy benchmark + first real VLM extractor (Qwen2-VL-2B) benchmarked
+> + shared US/EU money parser that fixed an oracle ground-truth bug).
 
 ## 1. What this is
 
@@ -66,16 +68,18 @@ incremental-update signal) stays reliable.
 (text + semantic label per box) so we can reconstruct `Receipt`s without OCR and
 measure the one thing the synthetic benchmark cannot: the real-world FP rate. Every
 receipt is legitimate, so **any flag is a false positive**.
-- Fused FP rate **0.398** (188/472). Pinning the corpus era (`--today 2019-12-31`)
-  leaves it **unchanged at 0.398** → the entire FP load is the `arithmetic` detector.
+- Fused FP rate **0.364** (172/472) with `--today 2019-12-31`, **down from 0.398**
+  after fixing a real ground-truth bug the VLM run exposed (see the money-parser note
+  below) — the entire FP load is still the `arithmetic` detector.
 - `tax_id`, `pdf_meta`, `duplicate` produce **zero** FPs (they abstain on this corpus,
   as designed). `date_sanity` never flags alone (its "very old" signal is 0.36
   weighted, under the 0.4 review line); its activity is purely the 2010-2019-vs-2026
   era gap, controllable with `--today`.
 - **Every** arithmetic failure traces to **lossy/noisy oracle extraction, not arithmetic
-  logic**: `subtotal!=sum(lines)`×70 (line items under-captured) and `total!=subtotal+tax`
-  ×133 (the annotation mislabels which box is the grand total, e.g. `metro total 2.24
-  != subtotal+tax 31.98`). A faithful extractor would reconcile these.
+  logic**: `subtotal!=sum(lines)`×63 (line items under-captured) and `total!=subtotal+tax`
+  ×117 (the annotation mislabels which box is the grand total, or the receipt carries a
+  service charge / tax-inclusive pricing the oracle can't see). A faithful extractor
+  would reconcile these.
 - **Takeaway:** arithmetic consistency is only as trustworthy as the money-field
   extractor feeding it — its real-world precision can't be measured without one, which
   makes the **faithful OCR/VLM extractor the next measured bottleneck**. Candidate
@@ -84,6 +88,69 @@ receipt is legitimate, so **any flag is a false positive**.
 - Real data also surfaced two robustness bugs synthetic data never could (now fixed +
   tested): `duplicate._key` crashed on a `None` date, and the CLI crashed printing
   non-cp1252 vendor text (★) on Windows. **43 tests pass.**
+
+**Extraction route — interface + confidence guard (2026-06-01):** the dependency-free
+foundation of the top-priority extractor work. New `extractors/` package: an
+`Extractor` ABC mirroring `Detector` (`name`, `handles`, `extract(path) -> Receipt`),
+a registry (`default_extractors()` / `extractor_for(route)`), and a `StructuredExtractor`
+for the STRUCTURED route. `slipguard score` now runs **route → extractor → detectors**
+uniformly (PDF/IMAGE give an honest "no extractor registered" until OCR/VLM lands).
+`Receipt` gained `field_confidence`, and `arithmetic` now **abstains** when its money
+fields were read below a confidence floor (default 0.5) — the audit's recommended fix.
+Behaviour-preserving: synthetic/oracle fields carry no confidence so they read as
+trusted (eval / eval-pdf leaderboards unchanged; the oracle-based eval-real FP — now
+0.364 after the money-parser fix noted below — stands until a *real* extractor reports
+low confidence; the guard is the mechanism,
+not a number-mover on the oracle). Also extracted the duplicated noisy-OR into
+`combine.noisy_or` (used by both `fusion` and `pdf_meta`). **50 tests pass.**
+
+**Extraction-accuracy benchmark (2026-06-01):** the extractor *selector* — the same
+measured-not-opinion rule the harness applies to detectors, now applied to extraction.
+`eval/extraction.py` (`evaluate_extractor` / `evaluate_extractors`) scores any
+`Extractor` field-by-field (vendor / date / subtotal / tax / total / line-count)
+against the WildReceipt KIE **oracle** as ground truth: the oracle `Receipt` is the
+reference, a candidate OCR/VLM extractor run on the *same image* is the prediction, and
+a field is scored **only when the oracle supplies a value** (so an extractor is never
+penalised for a field truth itself lacks; a raise counts as a miss + error, not a
+crash). Money reuses the `arithmetic` tolerance; vendor reuses `duplicate._norm_vendor`
+(DRY). New CLI `eval-extract` prints a per-field table + macro-avg leaderboard and
+honestly reports "no extractor handles the IMAGE route yet" until a real extractor is
+registered — i.e. the *measurement* is ready, so the Phase-2 OCR/VLM candidates get
+picked by numbers, not reputation. `data/wildreceipt.py` now resolves `image_path` to a
+full path so an image extractor can open the source. **62 tests pass** (+12
+extraction-metric tests: perfect extractor → 1.0, broken → 0.0 with error count, money
+tolerance, fuzzy vendor, scored-only-when-oracle-has-the-field, exact line-count).
+
+**First real extractor benchmarked — Qwen2-VL-2B-Instruct (2026-06-01):** the OCR/VLM
+candidate the benchmark was built to rank now exists (`extractors/vlm_qwen.py`, default
+`Qwen/Qwen2-VL-2B-Instruct`, apache-2.0). It prompts the VLM to emit the `Receipt`
+schema as JSON, loads via transformers Auto classes (so any HF VLM is a swappable
+`--model` candidate), keeps all heavy imports (torch/transformers/PIL) lazy, and is
+registered for the IMAGE route. Headline `eval-extract --limit 100` (WildReceipt test,
+scored against the oracle): **macro field-accuracy 0.725, 0 extractor errors** — vendor
+0.880, date 0.915, subtotal 0.740, tax 0.614, total 0.598, line_count 0.602. The model
+reads dates and vendor names very reliably; money/line-count are the weak fields (tax
+and grand total get confused on multi-tax / service-charge receipts) — exactly the
+signal `arithmetic` depends on, so it sets the realistic ceiling on arithmetic precision.
+⚠️ Scored against an *oracle that is itself imperfect*, so these are agreement-with-KIE
+numbers, not absolute truth — honest, reproducible, and good enough to pick extractors by.
+Runtime: bf16 fully on the 8 GB dev GPU (~4.5 GB peak, ~7-15 s/receipt steady-state).
+
+**Oracle money-format bug the VLM run exposed + the shared parser fix (2026-06-01):**
+inspecting per-receipt disagreements showed a chunk of the "errors" were the *oracle*
+being wrong, not the model. WildReceipt's old money parser stripped commas, so European
+decimals (`Eur129,75` → `12975`, a 100× error) and bare leading dots (`.70` → `70`, a
+tax larger than the total) corrupted the ground truth feeding **both** `eval-extract`
+and the `eval-real` FP audit. Fixed by extracting one shared, US/EU-aware
+`money.parse_money` (new `money.py`) used by **both** the oracle and the VLM extractor
+(DRY): the rightmost separator is the decimal point only when 1-2 digits follow it,
+otherwise it is thousands grouping (handles `1,234.56`, `1.234,56`, `1,23,456.78`,
+`.70`, `-1.234,56`). The vendor metric was also made fair — `_vendor_ok` now credits
+substring containment in either direction (oracle's terse `COSTCO` vs a fuller `Costco
+Wholesale`) with a length floor, so a correct fuller name is not scored as wrong. These
+fixes are what dropped the audit FP **0.398 → 0.364**: the oracle, not the detector, had
+been over-counting arithmetic contradictions. **81 tests pass** (+ shared money-parser
+unit tests, an EU-decimal oracle regression test, and a vendor-containment test).
 
 ## 4. Quickstart
 
@@ -95,6 +162,7 @@ python -m pytest                 # run tests
 slipguard eval                   # structured benchmark leaderboard
 slipguard eval-pdf               # PDF-provenance benchmark leaderboard
 slipguard eval-real              # real-receipt false-positive audit (needs datasets/wildreceipt)
+slipguard eval-extract           # rank extractors on field accuracy vs the WildReceipt oracle
 slipguard score data/demo.json   # score one receipt JSON (see data/demo.json)
 
 # Fetch the real corpus for eval-real (not committed; Apache-2.0):
@@ -110,7 +178,7 @@ PYTHONPATH=src python -m slipguard eval
 ```
 raw input ──routing.route_path──> DocumentType {PDF | IMAGE | STRUCTURED}
                                         │
-                  (extraction approach: VLM / OCR+KIE — NOT yet wired)
+        extractor_for(route).extract  (StructuredExtractor live; OCR/VLM planned)
                                         ▼
                                    Receipt (models.py)
                                         │
@@ -137,8 +205,15 @@ pyproject.toml            packaging; pytest pythonpath=src; console script `slip
 src/slipguard/
   models.py               domain models + Signal/Verdict (shared contracts)
   routing.py              classify raw input -> DocumentType (PDF/IMAGE/STRUCTURED)
-  fusion.py               Fuser: noisy-OR risk + approve/review/reject
-  cli.py / __main__.py    `slipguard eval` / `eval-pdf` / `score`
+  combine.py              noisy_or(): the one probability-combination rule, shared
+  money.py                parse_money(): shared US/EU-aware money parser (oracle + VLM extractor, DRY)
+  fusion.py               Fuser: noisy-OR risk (via combine.noisy_or) + approve/review/reject
+  cli.py / __main__.py    `slipguard eval` / `eval-pdf` / `eval-real` / `eval-extract` / `score`
+  extractors/
+    base.py               Extractor ABC: handles / can_handle / extract(path) -> Receipt
+    structured.py         StructuredExtractor: Receipt JSON -> Receipt (dependency-free)
+    vlm_qwen.py           VLM extractor (Qwen2-VL-2B default, apache-2.0); IMAGE route; lazy torch/transformers
+    __init__.py           default_extractors() + extractor_for(route) registry
   detectors/
     base.py               Detector ABC: applicable/prime/score, shared run(), _abstain()
     arithmetic.py         line items -> subtotal -> tax -> total reconciliation
@@ -155,9 +230,10 @@ src/slipguard/
     wildreceipt.py        WildReceipt loader: KIE annotations -> Receipt (oracle extraction, no OCR)
   eval/
     metrics.py            dependency-free precision/recall/F1/AUC/FPR
-    harness.py            evaluate() -> per-detector + fused Report (leaderboard)
+    harness.py            evaluate() -> per-detector + fused Report (detector leaderboard)
     audit.py              audit_false_positives() -> FP report on a legitimate corpus (eval-real)
-tests/                    43 tests: detectors, synth invariants, harness, pdf forensics, loader, FP audit
+    extraction.py         evaluate_extractors() -> field-accuracy leaderboard vs the oracle (eval-extract)
+tests/                    81 tests: detectors, synth invariants, harness, pdf forensics, loader, FP audit, extraction + extraction-eval, money parser
 ```
 
 ## 7. How to add a new detection approach
@@ -177,12 +253,18 @@ Nothing else changes: fusion and the harness consume any `Detector` uniformly.
 
 ## 8. Roadmap (each plugs in behind the same `Detector` contract)
 
-- **M2 — Extraction route (now the measured bottleneck):** the real-data audit shows
-  arithmetic precision is capped by extraction quality, so a **faithful money-field
-  extractor** is the top priority. VLM (Qwen2.5-VL) / OCR+KIE (PaddleOCR PP-Structure,
-  docTR) turning real photos/PDFs into `Receipt`s, wired into `cli.score`. Make the
-  extractor itself a swappable, separately-evaluated approach, and have it surface a
-  per-field confidence so `arithmetic` can abstain instead of crying wolf on a misread.
+- **M2.5 — Extraction route (the measured bottleneck):** *interface + confidence guard
+  + accuracy benchmark + first VLM extractor done* — `Extractor` ABC + registry +
+  `StructuredExtractor`, `score` flows through it, `arithmetic` abstains on low-confidence
+  money fields, and `eval/extraction.py` (`eval-extract`) ranks extractors on field
+  accuracy vs the WildReceipt oracle. The first real candidate, **Qwen2-VL-2B-Instruct**
+  (`extractors/vlm_qwen.py`, apache-2.0), is registered for the IMAGE route and scores
+  **macro 0.725** field-accuracy (vendor 0.880 / date 0.915 / subtotal 0.740 / tax 0.614 /
+  total 0.598 / line_count 0.602) on 100 real receipts, 0 extractor errors. **Next (heavy
+  deps):** a second candidate — OCR+KIE (PaddleOCR PP-Structure / docTR, Apache-2.0) —
+  benchmarked head-to-head via `eval-extract`; surface per-field confidence from the VLM
+  to arm the guard; then re-run `eval-real` to measure arithmetic's *true* FP rate on
+  faithfully-extracted fields.
 - **M2 — PDF & metadata forensics (started):** `pdf_meta` ships incremental-update,
   editor-tag and creation/mod-date checks, dependency-free. Next: pikepdf/pdfid for
   xref-stream + compressed/XMP metadata and text-over-scan; exiftool for image

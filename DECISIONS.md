@@ -52,6 +52,21 @@ fuser.
 harness has produced enough labelled per-detector performance to fit on — otherwise
 we'd be fitting noise. **Plan:** replace it in M3 (see [ROADMAP.md](ROADMAP.md)).
 
+### 1.6 Extraction is a pluggable, separately-evaluated approach (like detectors)
+**Decision:** the OCR/VLM extractor is not hard-wired — it implements an `Extractor`
+contract mirroring `Detector` (`name`, `handles`, `extract(path) -> Receipt`), is
+chosen by `extractor_for(route)`, and is **benchmarked head-to-head** on field-level
+accuracy by `eval/extraction.py` (`slipguard eval-extract`) — scored against the
+WildReceipt KIE labels as a ground-truth *oracle*, exactly as detectors are ranked by
+the harness.
+**Why:** the real-data audit showed arithmetic precision is capped by extraction
+quality, so the extractor is itself a measured, swappable component — we want to
+*rank* OCR+KIE vs VLM on numbers, not pick one by reputation. The extractor also
+surfaces **per-field confidence**, which lets `arithmetic` abstain on a misread
+instead of asserting fraud (the audit's recommended fix). **Alternative rejected:**
+baking one extractor into the score path — opaque, unswappable, and it couples
+detector quality to a single extraction choice.
+
 ---
 
 ## 2. Libraries / models / techniques
@@ -66,7 +81,8 @@ we'd be fitting noise. **Plan:** replace it in M3 (see [ROADMAP.md](ROADMAP.md))
 | **LayoutLMv3** (document KIE) | ❌ Avoided | Licence **CC-BY-NC** — non-commercial; unusable in a shipping product. |
 | **Surya** (OCR) | ❌ Avoided | **GPL** — copyleft; incompatible with a closed internal product. |
 | **docTR / PaddleOCR** (OCR / PP-Structure) | 🔜 Planned for extraction | **Apache-2.0**, strong receipt/layout performance, commercial-safe. |
-| **Qwen2.5-VL** (VLM extraction) | 🔜 Candidate for extraction | Permissive licence (verify per checkpoint size); strong at reading messy receipts end-to-end. |
+| **Qwen-VL** (VLM extraction; default **Qwen2-VL-2B-Instruct**) | ✅ **In use** | Apache-2.0 *and* fits the 8 GB dev GPU natively. Licence verified per checkpoint against HF metadata: 2.5-VL-**7B** + 2-VL-**2B** are Apache-2.0; **2.5-VL-3B has no declared licence → rejected** (unclear = unusable, same posture as FUNSD/Find-it-again!). Loaded via transformers Auto classes so any HF VLM is a swappable candidate; ranked by `eval-extract` → first measured result **macro 0.725** field-accuracy on 100 real receipts (0 errors; vendor 0.880 / date 0.915 / money fields 0.60–0.74). |
+| **Shared `money.parse_money`** (US/EU-aware money parser) | ✅ Used | One parser for **both** the WildReceipt oracle and the VLM extractor (DRY). A naive comma-stripper read European decimals (`Eur129,75`) 100× too high and corrupted *both* `eval-extract` and the FP audit; the fix treats the rightmost separator as the decimal point only with 1-2 trailing digits, else thousands grouping (`1,234.56`, `1.234,56`, `1,23,456.78`, `.70`). |
 | **CLIP / ViT AI-image detectors** (e.g. C2P-CLIP, Community Forensics) | 🔜 Planned as *weak* signal | Permissive; but per §1.2 only ever a calibrated weak input, evaluated honestly under laundering. |
 
 ---
@@ -96,5 +112,10 @@ Synthetic benchmark numbers (~1.0 fused AUC) are reported **only** as validation
 the harness and detector *logic* on fraud that violates these exact rules. Every doc
 repeats this caveat. Real-world performance claims wait for real corpora and the
 image/extraction routes. The real-data audit deliberately reports the unflattering
-number (39.8% FP) *with its true cause* (lossy extraction, not detector error) rather
-than hiding it — because the cause is what tells us where to invest next.
+number (**0.364** FP) *with its true cause* (lossy extraction, not detector error)
+rather than hiding it — because the cause is what tells us where to invest next. The
+same discipline turned on our *own* ground truth: the first VLM run disagreed with the
+oracle on European-decimal receipts, and on inspection the **oracle** was wrong (a
+comma-stripping parser read `129,75` as `12975`), not the model — so we fixed the oracle
+(shared `money.parse_money`), which is what moved the audit FP from 0.398 to 0.364. We
+trust measured disagreement enough to audit the reference, not just the candidate.
