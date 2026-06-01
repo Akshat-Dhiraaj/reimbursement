@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Data / model artifacts (kept out of git; generated locally)
+data/
+artifacts/
+*.ckpt
+*.pt
+*.onnx
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slipguard"
+version = "0.1.0"
+description = "Reimbursement slip / invoice fraud detection — independent detectors selected by measured performance"
+requires-python = ">=3.10"
+dependencies = [
+    "python-stdnum>=1.19",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+slipguard = "slipguard.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
