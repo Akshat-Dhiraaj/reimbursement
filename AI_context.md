@@ -2,7 +2,7 @@
 
 > Handoff doc for transferring this project to a fresh AI session or engineer.
 > **Keep this file updated every milestone** (status, architecture, roadmap).
-> Last updated: 2026-06-01 (Milestone 2).
+> Last updated: 2026-06-01 (Milestone 2 + first real-data false-positive audit).
 
 ## 1. What this is
 
@@ -60,6 +60,31 @@ It does **not** yet decode xref-stream / compressed / XMP metadata (needs pikepd
 pdfid) — on those PDFs the string fields read `None` while the `%%EOF` count (the
 incremental-update signal) stays reliable.
 
+**First real-data false-positive audit (2026-06-01):** ran the detectors over the
+**WildReceipt test split** (472 *genuine* receipts; Apache-2.0) via the new
+`eval-real` command. WildReceipt's KIE annotations act as an **oracle extractor**
+(text + semantic label per box) so we can reconstruct `Receipt`s without OCR and
+measure the one thing the synthetic benchmark cannot: the real-world FP rate. Every
+receipt is legitimate, so **any flag is a false positive**.
+- Fused FP rate **0.398** (188/472). Pinning the corpus era (`--today 2019-12-31`)
+  leaves it **unchanged at 0.398** → the entire FP load is the `arithmetic` detector.
+- `tax_id`, `pdf_meta`, `duplicate` produce **zero** FPs (they abstain on this corpus,
+  as designed). `date_sanity` never flags alone (its "very old" signal is 0.36
+  weighted, under the 0.4 review line); its activity is purely the 2010-2019-vs-2026
+  era gap, controllable with `--today`.
+- **Every** arithmetic failure traces to **lossy/noisy oracle extraction, not arithmetic
+  logic**: `subtotal!=sum(lines)`×70 (line items under-captured) and `total!=subtotal+tax`
+  ×133 (the annotation mislabels which box is the grand total, e.g. `metro total 2.24
+  != subtotal+tax 31.98`). A faithful extractor would reconcile these.
+- **Takeaway:** arithmetic consistency is only as trustworthy as the money-field
+  extractor feeding it — its real-world precision can't be measured without one, which
+  makes the **faithful OCR/VLM extractor the next measured bottleneck**. Candidate
+  mitigation: arithmetic should **abstain** when the extracted fields look incomplete /
+  low-confidence rather than asserting fraud.
+- Real data also surfaced two robustness bugs synthetic data never could (now fixed +
+  tested): `duplicate._key` crashed on a `None` date, and the CLI crashed printing
+  non-cp1252 vendor text (★) on Windows. **43 tests pass.**
+
 ## 4. Quickstart
 
 ```bash
@@ -69,7 +94,12 @@ pip install -e ".[dev]"          # editable install + pytest
 python -m pytest                 # run tests
 slipguard eval                   # structured benchmark leaderboard
 slipguard eval-pdf               # PDF-provenance benchmark leaderboard
+slipguard eval-real              # real-receipt false-positive audit (needs datasets/wildreceipt)
 slipguard score data/demo.json   # score one receipt JSON (see data/demo.json)
+
+# Fetch the real corpus for eval-real (not committed; Apache-2.0):
+#   curl -L -o datasets/wildreceipt.tar https://download.openmmlab.com/mmocr/data/wildreceipt.tar
+#   tar -xf datasets/wildreceipt.tar -C datasets
 
 # Without installing, prefix module runs with the src path:
 PYTHONPATH=src python -m slipguard eval
@@ -122,10 +152,12 @@ src/slipguard/
   data/
     synth.py              synthetic structured clean+fraud generator (benchmark backbone)
     pdfsynth.py           synthetic PDF generator (build_pdf byte layout) + 3 provenance tampers
+    wildreceipt.py        WildReceipt loader: KIE annotations -> Receipt (oracle extraction, no OCR)
   eval/
     metrics.py            dependency-free precision/recall/F1/AUC/FPR
     harness.py            evaluate() -> per-detector + fused Report (leaderboard)
-tests/                    31 tests: detectors, synth invariants, harness, pdf forensics
+    audit.py              audit_false_positives() -> FP report on a legitimate corpus (eval-real)
+tests/                    43 tests: detectors, synth invariants, harness, pdf forensics, loader, FP audit
 ```
 
 ## 7. How to add a new detection approach
@@ -145,9 +177,12 @@ Nothing else changes: fusion and the harness consume any `Detector` uniformly.
 
 ## 8. Roadmap (each plugs in behind the same `Detector` contract)
 
-- **M2 — Extraction route:** VLM (Qwen2.5-VL) / OCR+KIE (PaddleOCR PP-Structure,
+- **M2 — Extraction route (now the measured bottleneck):** the real-data audit shows
+  arithmetic precision is capped by extraction quality, so a **faithful money-field
+  extractor** is the top priority. VLM (Qwen2.5-VL) / OCR+KIE (PaddleOCR PP-Structure,
   docTR) turning real photos/PDFs into `Receipt`s, wired into `cli.score`. Make the
-  extractor itself a swappable, separately-evaluated approach.
+  extractor itself a swappable, separately-evaluated approach, and have it surface a
+  per-field confidence so `arithmetic` can abstain instead of crying wolf on a misread.
 - **M2 — PDF & metadata forensics (started):** `pdf_meta` ships incremental-update,
   editor-tag and creation/mod-date checks, dependency-free. Next: pikepdf/pdfid for
   xref-stream + compressed/XMP metadata and text-over-scan; exiftool for image

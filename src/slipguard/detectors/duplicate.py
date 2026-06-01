@@ -39,7 +39,8 @@ class DuplicateDetector(Detector):
             self._items.append((_norm_vendor(r.vendor_name), r.date, round(r.total, 2), r.doc_id))
 
     def _key(self, r: Receipt) -> tuple:
-        return (_norm_vendor(r.vendor_name), r.date.isoformat(), round(r.total or 0.0, 2))
+        date_key = r.date.isoformat() if r.date is not None else ""
+        return (_norm_vendor(r.vendor_name), date_key, round(r.total or 0.0, 2))
 
     def score(self, receipt: Receipt) -> Signal:
         r = receipt
