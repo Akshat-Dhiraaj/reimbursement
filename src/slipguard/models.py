@@ -24,6 +24,7 @@ class FraudType(str, Enum):
     DATE = "date"                    # impossible or implausible date
     TAX_ID = "tax_id"               # malformed / wrong-checksum tax id
     DUPLICATE = "duplicate"          # resubmission of an existing receipt
+    METADATA = "metadata"            # PDF provenance: edited-after-write / editor tags
     AI_GENERATED = "ai_generated"    # whole image synthesised (image route, later)
     IMAGE_TAMPER = "image_tamper"    # local edit / inpaint (image route, later)
 
@@ -61,6 +62,7 @@ class Receipt:
     time: Optional[Time] = None
     payment_method: Optional[str] = None
     source: DocumentType = DocumentType.STRUCTURED
+    source_path: Optional[str] = None  # original document on disk (PDF/image) for provenance forensics
     image_path: Optional[str] = None
     raw_text: Optional[str] = None
 

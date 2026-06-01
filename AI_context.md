@@ -2,7 +2,7 @@
 
 > Handoff doc for transferring this project to a fresh AI session or engineer.
 > **Keep this file updated every milestone** (status, architecture, roadmap).
-> Last updated: 2026-06-01 (Milestone 1).
+> Last updated: 2026-06-01 (Milestone 2).
 
 ## 1. What this is
 
@@ -43,6 +43,23 @@ own subtype) at **1.0 target-recall / 0 FP**; **fused AUC 1.0, recall 1.0, FP 0*
 violates these exact rules. They say **nothing** about real-world / AI-generated
 fraud — that needs the image+VLM layers and real datasets (Milestone 2+).
 
+**Milestone 2 (in progress):** the real-document route — **PDF provenance forensics**.
+- Detector `pdf_meta` (`forensics/pdf.py` inspector + `detectors/pdfmeta.py`): flags
+  **incremental updates** (appended xref / extra `%%EOF`), **editor tags** in
+  `/Producer`·`/Creator` (Photoshop, iLovePDF, …), and **ModDate ≫ CreationDate**.
+  Dependency-free — raw bytes + regex over the literal Info dict.
+- Synthetic PDF benchmark (`data/pdfsynth.py`; `build_pdf` writes a valid byte
+  layout, no third-party dep) covering the three provenance tampers. New CLI
+  `eval-pdf`. **31 passing tests** total.
+
+PDF benchmark (synthetic, seed 0): structured detectors **abstain** on bare PDFs;
+`pdf_meta` scores **AUC 1.0 / recall 1.0 / 0 FP** over 45 provenance frauds, which
+fusion routes to **REVIEW** (provenance warrants a human look, not an auto-reject).
+⚠️ Same caveat: this validates the layer on tampers that violate these exact signals.
+It does **not** yet decode xref-stream / compressed / XMP metadata (needs pikepdf/
+pdfid) — on those PDFs the string fields read `None` while the `%%EOF` count (the
+incremental-update signal) stays reliable.
+
 ## 4. Quickstart
 
 ```bash
@@ -50,7 +67,8 @@ fraud — that needs the image+VLM layers and real datasets (Milestone 2+).
 pip install -e ".[dev]"          # editable install + pytest
 
 python -m pytest                 # run tests
-slipguard eval                   # benchmark leaderboard
+slipguard eval                   # structured benchmark leaderboard
+slipguard eval-pdf               # PDF-provenance benchmark leaderboard
 slipguard score data/demo.json   # score one receipt JSON (see data/demo.json)
 
 # Without installing, prefix module runs with the src path:
@@ -67,8 +85,8 @@ raw input ──routing.route_path──> DocumentType {PDF | IMAGE | STRUCTURED
                                    Receipt (models.py)
                                         │
         ┌───────────── default_detectors() — each Detector.run(receipt) ─────────────┐
-        arithmetic        tax_id          date_sanity        duplicate     (+ future: AI-image,
-        (reconcile)   (GSTIN/VAT)     (future date)      (resubmission)     tamper-loc, PDF/EXIF)
+        arithmetic   tax_id      date_sanity  duplicate    pdf_meta      (+ future: AI-image,
+        (reconcile) (GSTIN/VAT) (future date)(resubmit)  (PDF provenance) tamper-loc, EXIF)
         └───────────────────────────── list[Signal] ───────────────────────────────┘
                                         ▼
                           Fuser.verdict  (noisy-OR risk + Decision)
@@ -90,19 +108,24 @@ src/slipguard/
   models.py               domain models + Signal/Verdict (shared contracts)
   routing.py              classify raw input -> DocumentType (PDF/IMAGE/STRUCTURED)
   fusion.py               Fuser: noisy-OR risk + approve/review/reject
-  cli.py / __main__.py    `slipguard eval` and `slipguard score`
+  cli.py / __main__.py    `slipguard eval` / `eval-pdf` / `score`
   detectors/
     base.py               Detector ABC: applicable/prime/score, shared run(), _abstain()
     arithmetic.py         line items -> subtotal -> tax -> total reconciliation
     taxid.py              python-stdnum GSTIN (IN) + EU VAT, abstains if unsupported
     datesanity.py         future / implausibly-old dates (today injectable)
     duplicate.py          exact + fuzzy resubmission match; prime()-d with history
+    pdfmeta.py            PDF provenance signal (reads forensics.inspect_pdf); PDF route only
     __init__.py           default_detectors() — the canonical ranked set
-  data/synth.py           synthetic labelled clean+fraud generator (benchmark backbone)
+  forensics/
+    pdf.py                dependency-free PDF provenance inspector (%%EOF / editor / date gap)
+  data/
+    synth.py              synthetic structured clean+fraud generator (benchmark backbone)
+    pdfsynth.py           synthetic PDF generator (build_pdf byte layout) + 3 provenance tampers
   eval/
     metrics.py            dependency-free precision/recall/F1/AUC/FPR
     harness.py            evaluate() -> per-detector + fused Report (leaderboard)
-tests/                    18 tests: detectors, synth invariants, harness
+tests/                    31 tests: detectors, synth invariants, harness, pdf forensics
 ```
 
 ## 7. How to add a new detection approach
@@ -125,9 +148,10 @@ Nothing else changes: fusion and the harness consume any `Detector` uniformly.
 - **M2 — Extraction route:** VLM (Qwen2.5-VL) / OCR+KIE (PaddleOCR PP-Structure,
   docTR) turning real photos/PDFs into `Receipt`s, wired into `cli.score`. Make the
   extractor itself a swappable, separately-evaluated approach.
-- **M2 — PDF & metadata forensics:** pikepdf/pdfid (incremental-update history,
-  producer/creator mismatch, text-over-scan), exiftool (editor tags, timestamp
-  mismatch). High-yield, hard to fake, commercial-safe.
+- **M2 — PDF & metadata forensics (started):** `pdf_meta` ships incremental-update,
+  editor-tag and creation/mod-date checks, dependency-free. Next: pikepdf/pdfid for
+  xref-stream + compressed/XMP metadata and text-over-scan; exiftool for image
+  EXIF/editor tags. High-yield, hard to fake, commercial-safe.
 - **M3 — Image route:** AI-generated detector (CLIP/ViT, diversity-trained) +
   tamper-localization, as **calibrated weak signals**, evaluated honestly under
   recompression/screenshot laundering.
