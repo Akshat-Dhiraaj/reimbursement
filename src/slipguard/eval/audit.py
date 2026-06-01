@@ -13,11 +13,14 @@ extraction completeness, not detector logic.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
 
 from ..detectors.base import Detector
 from ..fusion import Fuser
 from ..models import Decision, Receipt
+
+if TYPE_CHECKING:  # only for the type hint — avoid importing the extractors package here
+    from ..extractors.base import Extractor
 
 # arithmetic reason text -> bucket, so we can separate "extraction was lossy"
 # (subtotal/total disagree because not every line was captured) from a genuine
@@ -120,6 +123,33 @@ class FalsePositiveAudit:
                 for r in e.reasons:
                     lines.append(f"      - {r}")
         return "\n".join(lines)
+
+
+def image_bearing(
+    receipts: Sequence[Receipt], limit: Optional[int] = None
+) -> list[Receipt]:
+    """The receipts an image-route extractor can open (those with an ``image_path``),
+    optionally capped at the first ``limit``. This is the exact subset ``reextract``
+    re-extracts, so auditing the oracle on ``image_bearing(receipts, N)`` compares it
+    against a VLM/OCR re-extraction on the **identical** N receipts — apples-to-apples,
+    not 472-oracle vs. 100-re-extracted."""
+    sourced = [r for r in receipts if r.image_path]
+    return sourced[:limit] if limit else sourced
+
+
+def reextract(
+    extractor: "Extractor",
+    receipts: Sequence[Receipt],
+    limit: Optional[int] = None,
+) -> list[Receipt]:
+    """Re-extract each receipt straight from its source image via a real ``Extractor``,
+    so the FP audit runs on *faithfully-extracted* fields — with the extractor's
+    ``field_confidence`` live — instead of the oracle's lossy KIE reconstruction. This
+    is what lets us measure arithmetic's TRUE false-positive rate (the audit named
+    extraction quality, not detector logic, as the binding constraint). Receipts with no
+    ``image_path`` are skipped; ``limit`` caps the count for a slow VLM on a laptop."""
+    sourced = image_bearing(receipts, limit)
+    return [extractor.extract(r.image_path, doc_id=r.doc_id) for r in sourced]
 
 
 def _coverage(receipts: Sequence[Receipt]) -> dict[str, int]:

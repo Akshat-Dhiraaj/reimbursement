@@ -51,3 +51,12 @@ def parse_money(text: object) -> Optional[float]:
             return None
         value = float(digits)
     return -value if neg else value
+
+
+def money_close(a: float, b: float, rel: float = 0.01, abs_tol: float = 0.02) -> bool:
+    """True when two money amounts are equal within the larger of an absolute floor
+    (cent-level rounding) and a relative band. Shared so that "the same amount" means one
+    thing everywhere: the ``arithmetic`` detector's reconciliation slack and the
+    extraction / calibration metrics' correctness check both defer to this. ``b`` is the
+    reference the relative band is taken against."""
+    return abs(a - b) <= max(abs_tol, rel * abs(b))

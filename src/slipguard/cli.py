@@ -6,13 +6,31 @@
   slipguard eval-pdf [--seed S] [--n-clean N] [--fraud-per-type K] [--workdir DIR]
       Build the synthetic PDF-provenance benchmark and print the leaderboard.
 
+  slipguard eval-image [--seed S] [--n-clean N] [--fraud-per-type K] [--workdir DIR]
+      Build the synthetic image-EXIF provenance benchmark and print the leaderboard
+      (requires Pillow, the [vlm] extra, to mint EXIF-bearing JPEGs).
+
   slipguard eval-real [--path DIR] [--split test|train|both] [--today YYYY-MM-DD]
+                      [--extractor oracle|doctr|vlm|MODEL_ID] [--limit N]
       Audit the detectors against a corpus of *legitimate* receipts (WildReceipt)
-      and report the real-world false-positive rate.
+      and report the real-world false-positive rate. By default fields come from the
+      WildReceipt KIE oracle; ``--extractor doctr|vlm`` instead re-extracts each receipt
+      from its image (slow -> use ``--limit``), measuring arithmetic's TRUE FP on
+      faithfully-extracted fields with the confidence guard live (a low-confidence digit
+      or under-captured line items make it abstain rather than cry fraud). With ``--limit``
+      the oracle path audits the SAME first-N image-bearing receipts, so oracle vs.
+      re-extracted FP is an apples-to-apples comparison.
 
   slipguard eval-extract [--path DIR] [--split test|train|both]
       Rank the IMAGE-route extractors on field-level accuracy against the
       WildReceipt KIE oracle (the ground truth). Picks the extractor by numbers.
+
+  slipguard eval-calibration [--path DIR] [--split ...] [--extractor vlm|doctr|MODEL_ID]
+                             [--limit N]
+      Ask whether an extractor's per-value confidence actually predicts a misread:
+      AUC of confidence-vs-oracle-correctness, a reliability table, and an abstain
+      threshold sweep. Tells us if a *calibrated* threshold could recover FP that the
+      principled 0.5 floor cannot (feeds the learned-fusion milestone).
 
   slipguard score RECEIPT.json
       Score one receipt (JSON of the Receipt fields) and print the verdict.
@@ -26,15 +44,23 @@ import sys
 from datetime import date as Date
 from typing import Optional, Sequence
 
+from .data.imagesynth import generate_image
 from .data.pdfsynth import generate_pdf
 from .data.synth import generate
 from .detectors import default_detectors
 from .detectors.base import Detector
 from .detectors.datesanity import DateSanityDetector
-from .eval.audit import audit_false_positives
+from .eval.audit import audit_false_positives, image_bearing, reextract
+from .eval.calibration import collect_confidence_rows, summarize_calibration
 from .eval.extraction import evaluate_extractors
 from .eval.harness import evaluate
-from .extractors import default_extractors, extractor_for, image_extractors
+from .extractors import (
+    default_extractors,
+    extractor_for,
+    image_extractor_for_spec,
+    image_extractors,
+)
+from .forensics.image import pillow_available
 from .fusion import Fuser
 from .models import DocumentType
 from .routing import route_path
@@ -53,6 +79,18 @@ def cmd_eval_pdf(args: argparse.Namespace) -> None:
         seed=args.seed, workdir=workdir,
     )
     print(f"(wrote {len(dataset.samples)} synthetic PDFs to {workdir})\n")
+    print(evaluate(dataset, default_detectors(), Fuser()))
+
+
+def cmd_eval_image(args: argparse.Namespace) -> None:
+    if not pillow_available():
+        raise SystemExit('Pillow is required to mint the image benchmark — pip install -e ".[vlm]"')
+    workdir = args.workdir or os.path.join("artifacts", "image_bench")
+    dataset = generate_image(
+        n_clean=args.n_clean, fraud_per_type=args.fraud_per_type,
+        seed=args.seed, workdir=workdir,
+    )
+    print(f"(wrote {len(dataset.samples)} synthetic receipt images to {workdir})\n")
     print(evaluate(dataset, default_detectors(), Fuser()))
 
 
@@ -82,9 +120,38 @@ def _load_wildreceipt(path: str, split: str) -> list:
         )
 
 
+def _pick_image_extractor(spec: str):
+    """The single IMAGE extractor named by ``spec`` ('doctr', 'vlm', or a HF model id),
+    or exit with its skip reason. Resolves through the spec map rather than picking the
+    'first runnable' candidate, so ``--extractor vlm`` is the VLM even when docTR is also
+    installed (and ``--extractor doctr`` is docTR even when the VLM is)."""
+    ex = image_extractor_for_spec(spec)
+    ok, why = ex.available()
+    if not ok:
+        raise SystemExit(
+            f"--extractor {spec!r} ({ex.name}) is not runnable: {why}; "
+            'install it, e.g. pip install -e ".[vlm]"'
+        )
+    return ex
+
+
 def cmd_eval_real(args: argparse.Namespace) -> None:
     receipts = _load_wildreceipt(args.path, args.split)
     today = Date.fromisoformat(args.today) if args.today else None
+
+    if args.extractor != "oracle":
+        # Re-extract each legitimate receipt straight from its image with a real
+        # extractor (the VLM), so the audit measures arithmetic's FP on faithfully
+        # extracted fields with the confidence guard live — not the oracle's lossy KIE.
+        ex = _pick_image_extractor(args.extractor)
+        receipts = reextract(ex, receipts, limit=args.limit)
+        print(f"Re-extracted {len(receipts)} receipts via {ex.name} "
+              "(replacing the oracle KIE)\n")
+    elif args.limit:
+        # Audit the oracle on the SAME first-N image-bearing receipts a re-extraction
+        # run would see, so oracle vs. re-extracted FP compares on identical receipts.
+        receipts = image_bearing(receipts, args.limit)
+
     print(audit_false_positives(receipts, _detectors_for_audit(today), Fuser()))
 
 
@@ -108,6 +175,16 @@ def cmd_eval_extract(args: argparse.Namespace) -> None:
     for report in evaluate_extractors(runnable, truths):
         print(report)
         print()
+
+
+def cmd_eval_calibration(args: argparse.Namespace) -> None:
+    receipts = _load_wildreceipt(args.path, args.split)
+    truths = image_bearing(receipts, args.limit)  # same subset the FP audit re-extracts
+    ex = _pick_image_extractor(args.extractor)
+    print(f"Calibrating {ex.name} confidence on {len(truths)} image-bearing receipts "
+          "vs the WildReceipt oracle\n")
+    rows = collect_confidence_rows(ex, truths)
+    print(summarize_calibration(rows, ex.name))
 
 
 def cmd_score(args: argparse.Namespace) -> None:
@@ -152,12 +229,24 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--workdir", default=None, help="where to write the synthetic PDFs")
     pp.set_defaults(func=cmd_eval_pdf)
 
+    pi = sub.add_parser("eval-image", help="run the synthetic image-EXIF provenance benchmark leaderboard")
+    pi.add_argument("--seed", type=int, default=0)
+    pi.add_argument("--n-clean", type=int, default=40)
+    pi.add_argument("--fraud-per-type", type=int, default=15)
+    pi.add_argument("--workdir", default=None, help="where to write the synthetic images")
+    pi.set_defaults(func=cmd_eval_image)
+
     pr = sub.add_parser("eval-real", help="false-positive audit on legitimate real receipts")
     pr.add_argument("--path", default=os.path.join("datasets", "wildreceipt"),
                     help="extracted wildreceipt/ directory")
     pr.add_argument("--split", default="test", choices=("train", "test", "both"))
     pr.add_argument("--today", default=None,
                     help="reference date YYYY-MM-DD for date_sanity (default: real today)")
+    pr.add_argument("--extractor", default="oracle",
+                    help="'oracle' (WildReceipt KIE, default), or 'doctr' / 'vlm' / a HF "
+                         "model id to re-extract fields from the source images before auditing")
+    pr.add_argument("--limit", type=int, default=None,
+                    help="audit only the first N receipts (a slow VLM on a laptop)")
     pr.set_defaults(func=cmd_eval_real)
 
     px = sub.add_parser("eval-extract", help="rank extractors on field accuracy vs the WildReceipt oracle")
@@ -168,6 +257,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="score only the first N receipts (a slow VLM on a laptop)")
     px.add_argument("--model", default=None, help="override the VLM checkpoint id")
     px.set_defaults(func=cmd_eval_extract)
+
+    pc = sub.add_parser("eval-calibration",
+                        help="does the extractor's per-value confidence predict a misread?")
+    pc.add_argument("--path", default=os.path.join("datasets", "wildreceipt"),
+                    help="extracted wildreceipt/ directory")
+    pc.add_argument("--split", default="test", choices=("train", "test", "both"))
+    pc.add_argument("--extractor", default="vlm",
+                    help="confidence-bearing IMAGE extractor: 'vlm' (default), 'doctr', "
+                         "or a HF model id ('oracle' has no confidence to calibrate)")
+    pc.add_argument("--limit", type=int, default=None,
+                    help="calibrate on the first N receipts (a slow VLM on a laptop)")
+    pc.set_defaults(func=cmd_eval_calibration)
 
     ps = sub.add_parser("score", help="score a single receipt JSON")
     ps.add_argument("path")

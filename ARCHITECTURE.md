@@ -27,7 +27,8 @@ flowchart TD
       D3[date_sanity<br/>future / very old]
       D4[duplicate<br/>resubmission match]
       D5[pdf_meta<br/>PDF provenance]
-      D6[image forensics<br/>PLANNED, weak signal]
+      D6[image_meta<br/>image EXIF provenance]
+      D7[image pixel forensics<br/>PLANNED, weak signal]
     end
     D --> DET
 
@@ -66,23 +67,48 @@ This stage turns a raw document into a `Receipt`. Every approach implements one
 `extract(path) -> Receipt`. `extractor_for(route)` picks the registered extractor,
 and `slipguard score` runs **route → extractor → detectors** uniformly. The
 dependency-free **`StructuredExtractor`** (reads a `Receipt` JSON) backs the STRUCTURED
-route; the **`QwenVLExtractor`** (`vlm_qwen.py`, default Qwen2-VL-2B-Instruct,
-apache-2.0) backs the IMAGE route — it prompts a VLM to emit the `Receipt` schema as
-JSON, loads via transformers Auto classes (any HF VLM is a swappable `--model`
-candidate), and keeps torch/transformers/PIL imports lazy so the package stays
-import-light. The **PDF route** still returns an explicit "no extractor registered"
-until an OCR/VLM PDF extractor lands (plan in [ROADMAP.md](ROADMAP.md)). Extractors are
-ranked head-to-head on field accuracy by `eval/extraction.py`; Qwen2-VL-2B currently
-scores **macro 0.725** vs the WildReceipt oracle.
+route; the IMAGE route has **two** benchmarked extractors: the **`QwenVLExtractor`**
+(`vlm_qwen.py`, default Qwen2-VL-2B-Instruct, apache-2.0) prompts a VLM to emit the
+`Receipt` schema as JSON (loads via transformers Auto classes — any HF VLM is a swappable
+`--model` candidate), and the **`DocTROCRExtractor`** (`doctr_ocr.py`, Apache-2.0) runs a
+two-stage OCR (text detection+recognition) feeding a transparent keyword/position KIE.
+Both keep torch/transformers/PIL/doctr imports lazy so the package stays import-light. The
+**PDF route** still returns an explicit "no extractor registered" until an OCR/VLM PDF
+extractor lands (plan in [ROADMAP.md](ROADMAP.md)). Extractors are ranked head-to-head on
+field accuracy by `eval/extraction.py`: on the same 100 receipts **Qwen2-VL-2B leads at
+macro 0.725, docTR second at 0.579** (so the IMAGE route ships the VLM — by the numbers).
+docTR's OCR is sound (it ties the VLM on date at 0.915 and *beats* it on `total`); a
+**row-merge** pre-pass (`_merge_rows`) was needed first because docTR emits a row's label
+and its right-column amount as separate lines — without it the single-line KIE scored a
+misleading 0.244, an own-pipeline bug, not an OCR limit.
 
 An extractor may set per-field confidence on the Receipt (`field_confidence`);
 `arithmetic` reads it and **abstains** when the money fields it needs were read
-below a confidence floor, so a misread no longer masquerades as fraud. The real-data
-audit uses WildReceipt's human KIE annotations as an **oracle extractor**
-(`data/wildreceipt.py`) — those fields carry no confidence, so they read as trusted,
-and the Qwen VLM does not emit per-field confidence yet either. The guard is therefore
-the *mechanism*; the audit's **0.364** arithmetic FP only drops once an extractor
-supplies low confidence on the boxes it misreads.
+below a confidence floor, so a misread no longer masquerades as fraud. The Qwen VLM
+supplies **two** honest confidence signals. (1) A **parse-completeness** confidence for
+`line_items` (the fraction of emitted items it could parse), which **arms** the guard on
+the under-capture case the audit named: a low ratio makes `arithmetic` abstain on a
+`subtotal ≠ Σlines` gap that is really a capture artifact rather than fraud. (2) A
+**per-token-logprob** confidence on the scalar money fields (`subtotal`, `tax_amount`,
+`total`): the same greedy decode emits per-token probabilities
+(`compute_transition_scores`), and the least-confident digit of each value becomes its
+confidence — free, riding the one pass with no extra inference. Honest verdict, measured in
+two steps. At the principled **0.5** abstain floor the logprob signal does **not** lower the
+audit FP — it catches only 18% of misreads, which clear the floor — and that first read as
+"the misreads are simply confident." But the calibration study (`eval/calibration.py`,
+`eval-calibration`; 222 scored money reads on the same 100 receipts) shows the signal is **far
+from uninformative**: **AUC 0.758** that a read disagrees with the oracle (0.77–0.83 per field),
+with a **monotonic reliability curve** — accuracy 0.37 below 0.6, 0.71 in [0.8, 0.9), 0.87 in
+[0.9, 1.0). So the *signal* is genuinely good; the *0.5 threshold* was just too low. There is no
+free lunch — every abstain threshold trades misread-recall for dropped-correct reads (T=0.7:
+51% of misreads caught, 17% of good reads dropped), and the arithmetic-breaking misreads skew
+confident — so its proper home is a **cost-aware learned fuser** (M3) that weighs this per-value
+feature against the cost of a needless abstain, not a hand-set floor. (Parse-completeness has its
+own complementary blind spot: it sees *emitted-but-unparseable* loss only, not items the model
+never emitted.) The real-data audit uses WildReceipt's human KIE annotations as an **oracle extractor**
+(`data/wildreceipt.py`) whose fields carry no confidence and so read as trusted; the audit's
+**0.364** arithmetic FP only drops once an extractor supplies low confidence on the boxes
+*it* misreads.
 
 ### 2.3 The `Receipt` contract — `models.py`
 The normalised unit every detector reads. Key fields: `vendor_name`, `date`,
@@ -120,7 +146,7 @@ This is the mechanism that lets us run every detector on every receipt without
 irrelevant ones polluting the risk score (e.g. `tax_id` abstains on a US receipt;
 `pdf_meta` abstains on a photo).
 
-### 2.6 The five current detectors
+### 2.6 The six current detectors
 
 | Detector | Reads | Flags when | Abstains when |
 |---|---|---|---|
@@ -129,6 +155,7 @@ irrelevant ones polluting the risk score (e.g. `tax_id` abstains on a US receipt
 | **date_sanity** | `date` | future date (0.92), or > 5y old (0.6, weak) | no date |
 | **duplicate** | `vendor`, `date`, `total` vs primed history | exact (vendor,date,total) match, or fuzzy vendor + same date + ~amount | no total |
 | **pdf_meta** | `source_path` (PDF bytes) | incremental update (extra `%%EOF`), editor tag in `/Producer`·`/Creator`, or ModDate ≫ CreationDate | non-PDF route, no source file |
+| **image_meta** | `source_path` (image EXIF, via Pillow) | image editor in EXIF `Software` (Photoshop/GIMP/…), or `DateTime` ≫ `DateTimeOriginal` (capture-vs-modify gap) | non-IMAGE route, no source file, Pillow absent, or **no EXIF** (stripped/screenshot/AI — not guilt) |
 
 Each is single-purpose by design: it scores high on *its* subtype and abstains or
 scores low elsewhere — which is why a single detector's overall AUC is ~0.625 on a
@@ -142,8 +169,8 @@ risk = 1 − Π (1 − weightedᵢ)      # skipping abstained signals
 ```
 
 Independent fraud signals compound; abstainers (weighted 0) can't move it. The
-formula itself lives once in `combine.noisy_or` and is reused by `pdf_meta` to
-combine its own provenance sub-signals — same rule, two levels.
+formula itself lives once in `combine.noisy_or` and is reused by `pdf_meta` and
+`image_meta` to combine their own provenance sub-signals — same rule, two levels.
 Thresholds: `risk ≥ 0.85 → REJECT`, `risk ≥ 0.4 → REVIEW`, else `APPROVE`.
 Deliberately simple and **replaceable by a learned/calibrated fuser** once the
 harness gives us measured per-detector performance to fit on (see ROADMAP).
@@ -164,12 +191,21 @@ harness gives us measured per-detector performance to fit on (see ROADMAP).
   the same tolerance as `arithmetic`; vendor uses the duplicate detector's normaliser.
   Backs `slipguard eval-extract`. **This is the extractor selector**, mirroring `harness.py`.
 
-### 2.9 Forensics — `forensics/pdf.py`
+### 2.9 Forensics — `forensics/pdf.py`, `forensics/image.py`
 `inspect_pdf(bytes_or_path)` → `PdfProvenance` (eof_count, producer, creator,
 creation/mod dates, matched editor tag, date-gap days). **Dependency-free**: raw
 bytes + regex over the literal Info dict. It never raises. Limitation: it does *not*
 yet decode xref-stream / compressed / XMP metadata (those need pikepdf/pdfid); on
 such PDFs the string fields read `None` while the `%%EOF` count stays reliable.
+
+`inspect_image(path)` → `ImageProvenance` (has_exif, software, make/model, capture &
+modify timestamps, matched editor tag, date-gap days) — the EXIF sibling of the PDF
+inspector. Uses **Pillow** (the `[vlm]` extra), imported lazily; `pillow_available()`
+lets the detector gate on it without importing. Reads `Software` (0x0131),
+`DateTime` (0x0132) and `DateTimeOriginal` (0x9003, in the Exif sub-IFD). Never raises
+on a non-image / EXIF-less file (returns `has_exif=False`). Design choice: **missing
+EXIF is not guilt** — it is common in legitimate shared receipts as well as
+stripped/AI images — so the detector abstains rather than accuses.
 
 ---
 
@@ -182,7 +218,7 @@ src/slipguard/
   combine.py              noisy_or(): the shared probability-combination rule
   money.py                parse_money(): shared US/EU-aware money parser (oracle + VLM extractor)
   fusion.py               Fuser: noisy-OR risk + APPROVE/REVIEW/REJECT
-  cli.py / __main__.py    eval | eval-pdf | eval-real | eval-extract | score
+  cli.py / __main__.py    eval | eval-pdf | eval-image | eval-real | eval-extract | score
   extractors/
     base.py               Extractor ABC (handles / can_handle / extract -> Receipt)
     structured.py         StructuredExtractor: Receipt JSON -> Receipt (dependency-free)
@@ -195,19 +231,23 @@ src/slipguard/
     datesanity.py         future / implausibly-old dates (today injectable)
     duplicate.py          exact + fuzzy resubmission match; prime()-d with history
     pdfmeta.py            PDF provenance signal (reads forensics.inspect_pdf)
+    imagemeta.py          image EXIF provenance signal (reads forensics.inspect_image)
     __init__.py           default_detectors() — the canonical ranked set
   forensics/
     pdf.py                dependency-free PDF provenance inspector
+    image.py              image EXIF provenance inspector (Pillow, lazy)
   data/
     synth.py              synthetic structured clean+fraud generator
     pdfsynth.py           synthetic PDF generator (byte layout) + 3 provenance tampers
+    imagesynth.py         synthetic image generator (real EXIF JPEGs) + 2 provenance tampers
     wildreceipt.py        WildReceipt loader: KIE annotations -> Receipt (oracle, no OCR)
   eval/
     metrics.py            dependency-free precision/recall/F1/AUC/FPR
     harness.py            evaluate() -> ranked Report (detector leaderboard / selector)
     audit.py              audit_false_positives() -> FP report on legitimate corpus
     extraction.py         evaluate_extractors() -> field-accuracy leaderboard vs oracle
-tests/                    81 tests
+    calibration.py        summarize_calibration() -> does per-value confidence predict a misread?
+tests/                    151 tests
 ```
 
 ---

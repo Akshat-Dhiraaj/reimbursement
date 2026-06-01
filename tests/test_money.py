@@ -7,7 +7,7 @@ last of which must stay an integer even though a lone comma can also be a decima
 
 from __future__ import annotations
 
-from slipguard.money import parse_money
+from slipguard.money import money_close, parse_money
 
 
 def test_us_decimal_and_symbols():
@@ -53,3 +53,16 @@ def test_none_on_garbage_or_empty():
     assert parse_money("no digits here") is None
     assert parse_money("") is None
     assert parse_money(None) is None
+
+
+def test_money_close_absolute_floor_and_relative_band():
+    # Absolute 2-cent floor dominates on small amounts (1% of 1.0 = 0.01 < 0.02).
+    # Stay inside the band, not on the 0.02 edge, to avoid float-boundary flapping.
+    assert money_close(1.00, 1.01)
+    assert money_close(1.00, 1.015)
+    assert not money_close(1.00, 1.05)
+    # Relative 1% band dominates on large amounts (1% of 1000 = 10 >> 0.02).
+    assert money_close(1000.0, 1009.0)
+    assert not money_close(1000.0, 1011.0)
+    # Exact match.
+    assert money_close(5.0, 5.0)

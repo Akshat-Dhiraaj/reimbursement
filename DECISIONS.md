@@ -67,6 +67,26 @@ instead of asserting fraud (the audit's recommended fix). **Alternative rejected
 baking one extractor into the score path — opaque, unswappable, and it couples
 detector quality to a single extraction choice.
 
+### 1.7 Per-value confidence = token logprobs, and it's a calibrated *feature* not a gate
+**Decision:** derive the scalar-field (subtotal/tax/total) misread confidence from the
+VLM's **per-token logprobs** of the greedy decode (the least-confident digit's
+probability), **not** from K× self-consistency sampling; and use it as an input to the
+future learned fuser, **not** as a standalone abstain threshold.
+**Why (the method):** logprobs are ≈free — the same greedy pass via `output_scores` +
+`compute_transition_scores().exp()` — whereas self-consistency costs K× the GPU time, and
+a smoke test showed it abstained on ≈0 receipts (it misses *stable* misreads). **Why (not a
+gate):** a calibration study on 100 receipts (222 scored reads vs the oracle, `slipguard
+eval-calibration`) measured the signal honestly — it separates correct-from-misread with
+**AUC 0.758** (subtotal 0.831 / tax 0.766 / total 0.795) and a **monotonic reliability
+curve** (accuracy 0.37 below 0.6 → 0.87 in [0.9,1.0) → 1.00 at full confidence), so the
+signal is genuinely informative. But there is **no free-lunch threshold**: at the principled
+0.5 floor it catches only 18% of misreads (they clear it), and raising the cutoff trades
+misread-recall for dropped-correct reads (T=0.7 catches 51% but drops 17% of good reads).
+**Conclusion:** it is a measured, calibrated per-value *feature* for the cost-aware learned
+fuser (§1.5, M3), which is exactly the labelled per-detector signal that fuser needs — not an
+unsupervised gate. **Alternative rejected:** self-consistency sampling (K× cost, misses stable
+misreads) and a fixed unsupervised abstain threshold (no single cutoff helps, per the sweep).
+
 ---
 
 ## 2. Libraries / models / techniques
@@ -77,10 +97,10 @@ detector quality to a single extraction choice.
 | **Dependency-free PDF parser** (raw bytes + regex over the Info dict) | ✅ Used for v1 | Zero runtime deps, fully commercial-safe, and the highest-yield signals (`%%EOF` count, editor tags, date gap) are visible in plain bytes. |
 | **pikepdf / pdfid** (xref-stream, compressed/XMP metadata, text-over-scan) | ⏳ Deferred | Needed to decode modern compressed PDFs the regex parser can't read, but adds a dependency and isn't required for the cheap wins. Scheduled, not skipped. |
 | **Noisy-OR fusion** | ✅ Used now | See §1.5. |
-| **Learned/calibrated fuser** | ⏳ Planned (M3) | Needs measured per-detector performance first; premature now. |
+| **Learned/calibrated fuser** | ⏳ Planned (M3) | Needs measured per-detector performance first; premature now. The first calibrated input now exists — the VLM's per-value confidence (AUC 0.758 vs oracle, §1.7) — which is exactly the kind of measured feature the fuser will consume. |
 | **LayoutLMv3** (document KIE) | ❌ Avoided | Licence **CC-BY-NC** — non-commercial; unusable in a shipping product. |
 | **Surya** (OCR) | ❌ Avoided | **GPL** — copyleft; incompatible with a closed internal product. |
-| **docTR / PaddleOCR** (OCR / PP-Structure) | 🔜 Planned for extraction | **Apache-2.0**, strong receipt/layout performance, commercial-safe. |
+| **docTR** (OCR + transparent keyword/position KIE) | ✅ **In use** (benchmarked 2nd) | **Apache-2.0**, commercial-safe. Landed as the OCR+KIE counterpoint to the VLM so the IMAGE route is *picked by numbers, not reputation*: two-stage text detection+recognition + a transparent same-row "keyword + money" KIE. On the **same** 100 receipts it scores **macro 0.579 vs the VLM's 0.725 → the VLM ships**, but the field read is the honest part — docTR is **competitive on the arithmetic-driving money fields** (tax 0.600 ≈ VLM 0.614; **total 0.696 > VLM 0.598**) and trails on vendor (0.380) + line_count (0.312). A first naive single-line KIE mis-scored it **0.244**: docTR's OCR read every amount correctly (date ties the VLM at 0.915), but it emits each summary row's *label* and *right-column amount* as **separate** lines, so a same-line rule read `SUBTOTAL`/`TOTAL` as money-less and the stray digit in `TAX1` as `1.0`. A transparent **row-merge** pre-pass (rejoin same-height lines, x-ordered so the amount stays right-most) lifted it **0.244 → 0.579** with no new model. KIE is still English-keyword heuristic (German *Netto/MwSt/Summe* miss). PaddleOCR/PP-Structure remains a future candidate, same contract. |
 | **Qwen-VL** (VLM extraction; default **Qwen2-VL-2B-Instruct**) | ✅ **In use** | Apache-2.0 *and* fits the 8 GB dev GPU natively. Licence verified per checkpoint against HF metadata: 2.5-VL-**7B** + 2-VL-**2B** are Apache-2.0; **2.5-VL-3B has no declared licence → rejected** (unclear = unusable, same posture as FUNSD/Find-it-again!). Loaded via transformers Auto classes so any HF VLM is a swappable candidate; ranked by `eval-extract` → first measured result **macro 0.725** field-accuracy on 100 real receipts (0 errors; vendor 0.880 / date 0.915 / money fields 0.60–0.74). |
 | **Shared `money.parse_money`** (US/EU-aware money parser) | ✅ Used | One parser for **both** the WildReceipt oracle and the VLM extractor (DRY). A naive comma-stripper read European decimals (`Eur129,75`) 100× too high and corrupted *both* `eval-extract` and the FP audit; the fix treats the rightmost separator as the decimal point only with 1-2 trailing digits, else thousands grouping (`1,234.56`, `1.234,56`, `1,23,456.78`, `.70`). |
 | **CLIP / ViT AI-image detectors** (e.g. C2P-CLIP, Community Forensics) | 🔜 Planned as *weak* signal | Permissive; but per §1.2 only ever a calibrated weak input, evaluated honestly under laundering. |

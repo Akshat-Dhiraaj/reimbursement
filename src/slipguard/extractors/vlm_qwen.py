@@ -1,4 +1,4 @@
-"""VLM extraction via Qwen2.5-VL — read a receipt photo end-to-end into a Receipt.
+"""VLM extraction via a Qwen-VL checkpoint — read a receipt photo end-to-end into a Receipt.
 
 This is the first *real* extractor for the IMAGE route (the audit named faithful
 extraction as the binding constraint). It implements the same `Extractor` contract as
@@ -20,9 +20,35 @@ methods**, so importing this module — and the whole package — stays dependen
 `available()` reports missing deps without loading the model, letting the benchmark skip
 an un-runnable candidate cleanly.
 
-Confidence note: a VLM does not emit calibrated per-field confidence, so we do **not**
-fabricate `field_confidence` here — the benchmark measures raw field accuracy, and
-confidence calibration (to arm the `arithmetic` abstain guard) is tracked as later work.
+Confidence note: a VLM does **not** emit a calibrated per-field probability, so we do
+not fabricate one. We report two *observed* signals into ``Receipt.field_confidence``,
+both of which arm the `arithmetic` abstain guard, and both honest about their limits:
+
+1. **Parse completeness** (line items): when the model emits line items we cannot all
+   parse (missing/garbled amounts), the captured line-item sum is unreliable, so
+   ``field_confidence["line_items"]`` carries the fraction we parsed. That covers exactly
+   the under-capture case the FP audit named — a low ratio makes arithmetic abstain instead
+   of crying fraud on a ``subtotal != sum(items)`` gap that is really a capture artifact.
+   Its blind spot: it sees *emitted-but-unparseable* loss only, never a cleanly-parsed-but-
+   **mislabeled scalar** (the head-to-head showed those, not capture loss, drive the FP).
+
+2. **Token logprobs on the scalar money fields**: the same greedy pass that produces the
+   value also exposes, per emitted token, the model's own probability for that token. We
+   align those probabilities back to the digits of ``subtotal`` / ``tax_amount`` / ``total``
+   and record the **least-confident digit's** probability per field (see
+   ``_field_confidence_from_tokens``). A value the model emitted hesitantly gets a low
+   probability → arithmetic abstains on that *misread* scalar — the gap (1) cannot see — and
+   it rides the SAME forward pass, so it is essentially free (no extra inference, unlike
+   re-sampling). Its blind spot, stated not hidden: a logprob measures the model's
+   *self-assurance*, not *truth* — a confidently-wrong read (a stable misread) can still
+   score high, and a field the model simply omits has no token to score at all (a coverage
+   gap, orthogonal to confidence). The **value** is always the deterministic greedy read, so
+   measured field accuracy is unchanged; only the confidence annotation is added.
+
+Both record only sub-1.0 values, so a clean / confident extraction leaves
+``field_confidence`` empty (== fully trusted) and behaviour is unchanged unless we actually
+observe parse loss or a low-probability digit. Both ride the single greedy decode — no extra
+inference cost.
 """
 
 from __future__ import annotations
@@ -105,9 +131,18 @@ def _parse_json_object(text: str) -> Optional[dict]:
 
 def _to_receipt(data: dict, doc_id: str, image_path: str) -> Receipt:
     """Map the parsed JSON dict to a Receipt, coercing types defensively. Pure +
-    model-free (unit-tested). A field the model omitted stays None / empty."""
+    model-free (unit-tested). A field the model omitted stays None / empty.
+
+    Also records line-item parse completeness in ``field_confidence`` (see the module
+    "Confidence note"): if the model emitted items we could not all parse, the kept
+    fraction is stored under ``"line_items"`` so the `arithmetic` guard can abstain on
+    a capture artifact instead of crying fraud. Only sub-1.0 values are recorded, so a
+    clean extraction leaves ``field_confidence`` empty == fully trusted (no behaviour
+    change)."""
     items: list[LineItem] = []
+    emitted = 0
     for it in data.get("line_items") or []:
+        emitted += 1  # count every entry the model put in line_items, parseable or not
         if not isinstance(it, dict):
             continue
         amount = _num(it.get("amount"))
@@ -119,6 +154,14 @@ def _to_receipt(data: dict, doc_id: str, image_path: str) -> Receipt:
             unit_price=_num(it.get("unit_price")) if _num(it.get("unit_price")) is not None else amount,
             amount=amount,
         ))
+
+    # Parse-completeness confidence (not a calibrated probability): the fraction of the
+    # emitted line items we could actually use. Recorded only when < 1.0, so a clean
+    # extraction keeps field_confidence empty (== fully trusted) and behaviour is
+    # unchanged. A low ratio arms the arithmetic abstain guard on under-capture.
+    field_confidence: dict[str, float] = {}
+    if emitted and len(items) < emitted:
+        field_confidence["line_items"] = round(len(items) / emitted, 3)
 
     vendor = data.get("vendor_name")
     return Receipt(
@@ -134,7 +177,69 @@ def _to_receipt(data: dict, doc_id: str, image_path: str) -> Receipt:
         source=DocumentType.IMAGE,
         source_path=image_path,
         image_path=image_path,
+        field_confidence=field_confidence,
     )
+
+
+#: scalar money fields whose token-logprob confidence arms the `arithmetic` guard
+#: (the keys it reads in ``Receipt.field_confidence``). ``date`` is deliberately omitted:
+#: no detector consumes a date confidence yet, so emitting one would be a dead signal.
+_CONF_FIELDS = ("subtotal", "tax_amount", "total")
+
+def _value_re(field: str) -> "re.Pattern[str]":
+    """Match a JSON scalar as the model emits it — ``"total": 58.22`` / ``"total": null``
+    and, defensively, a quoted number (``"total": "58.22"``) the prompt told it not to
+    produce. Capture group 1 is the value's digits (or the literal ``null``); the optional
+    leading quote sits outside the group so the char span we score is the number itself."""
+    return re.compile(r'"' + re.escape(field) + r'"\s*:\s*"?(null|-?\d[\d.,]*)')
+
+
+def _incremental_spans(decode, token_ids: list[int]) -> tuple[str, list[tuple[int, int]]]:
+    """Decode ``token_ids`` one prefix at a time and return ``(text, spans)`` where
+    ``spans[i]`` is the ``[start, end)`` character range token ``i`` contributed to ``text``.
+    Incremental prefix decoding is the robust way to map subword tokens back to characters:
+    the i-th token occupies whatever ``decode(ids[:i+1])`` appended past ``decode(ids[:i])``.
+    A token that adds no visible text (e.g. a skipped special token) gets an empty span and
+    so covers no field value. ``decode`` is injected — a plain ``list[int] -> str`` callable —
+    so this is pure + GPU-free (the tests pass a trivial char decoder; production passes the
+    HF tokenizer's ``decode``)."""
+    spans: list[tuple[int, int]] = []
+    prev = ""
+    for i in range(len(token_ids)):
+        cur = decode(token_ids[: i + 1])
+        start = len(prev)
+        spans.append((start, max(start, len(cur))))
+        prev = cur
+    return prev, spans
+
+
+def _field_confidence_from_tokens(
+    text: str, spans: list[tuple[int, int]], probs: list[float], fields=_CONF_FIELDS
+) -> dict[str, float]:
+    """Map per-token probabilities onto the scalar money fields: for each present, non-null
+    field, find its numeric value in the JSON ``text``, take the tokens whose char spans
+    cover that value, and record the **min** of their probabilities — the least-confident
+    digit. Min (not mean or product) because one shaky digit should drag the whole field's
+    confidence down, and min is length-unbiased: a long amount is not penalised merely for
+    spanning more tokens. A field that is absent or explicitly ``null`` is skipped (no value
+    to score), and only sub-1.0 ratios are recorded — mirroring the parse-completeness
+    convention so a fully confident read leaves ``field_confidence`` empty (== trusted) and
+    the arithmetic guard behaves exactly as before. Pure + GPU-free (``spans``/``probs`` come
+    from :func:`_incremental_spans` and ``compute_transition_scores`` in production)."""
+    conf: dict[str, float] = {}
+    for fld in fields:
+        m = _value_re(fld).search(text)
+        if m is None or m.group(1) == "null":
+            continue  # field not emitted, or emitted as null -> no digits to be (un)sure of
+        vstart, vend = m.span(1)
+        covering = [p for (ts, te), p in zip(spans, probs)
+                    if te > ts and ts < vend and te > vstart]  # tokens overlapping the value
+        if not covering:
+            continue
+        ratio = round(min(covering), 3)
+        if ratio < 1.0:  # record only uncertainty (mirrors the line_items convention)
+            conf[fld] = ratio
+    return conf
 
 
 class QwenVLExtractor(Extractor):
@@ -203,8 +308,43 @@ class QwenVLExtractor(Extractor):
         scale = self.max_image_side / longest
         return image.resize((max(1, int(w * scale)), max(1, int(h * scale))))
 
-    def extract(self, path: str, doc_id: Optional[str] = None) -> Receipt:
+    def _read_with_confidence(self, inputs) -> tuple[str, dict[str, float]]:
+        """One greedy decode that returns both the reply text and a per-scalar token-logprob
+        confidence. ``output_scores`` keeps the per-step logits; ``compute_transition_scores``
+        turns them into the log-probability the model assigned to *each token it actually
+        chose*, which ``.exp()`` makes a probability. We decode the generated ids
+        incrementally to map every token to its character span, then
+        :func:`_field_confidence_from_tokens` aligns those probabilities to the money values.
+        The text is taken from the SAME incremental decode the spans index into, so the JSON
+        we parse and the spans we score can never drift apart."""
         import torch
+
+        with torch.no_grad():
+            out = self._model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=False,
+                output_scores=True,
+                return_dict_in_generate=True,
+            )
+        gen_ids = out.sequences[:, inputs["input_ids"].shape[1]:]
+        token_ids = gen_ids[0].tolist()
+        # log-prob of each chosen token -> probability (one value per generated token)
+        scores = self._model.compute_transition_scores(
+            out.sequences, out.scores, normalize_logits=True
+        )
+        probs = scores[0].exp().tolist()
+
+        tok = getattr(self._processor, "tokenizer", self._processor)
+        text, spans = _incremental_spans(
+            lambda ids: tok.decode(
+                ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            ),
+            token_ids,
+        )
+        return text, _field_confidence_from_tokens(text, spans, probs)
+
+    def extract(self, path: str, doc_id: Optional[str] = None) -> Receipt:
         from PIL import Image
 
         self._ensure_model()
@@ -218,16 +358,14 @@ class QwenVLExtractor(Extractor):
         )
         inputs = self._processor(text=[prompt], images=[image], return_tensors="pt")
         inputs = inputs.to(self._model.device)
-        with torch.no_grad():
-            out_ids = self._model.generate(
-                **inputs, max_new_tokens=self.max_new_tokens, do_sample=False
-            )
-        gen = out_ids[:, inputs["input_ids"].shape[1]:]
-        text_out = self._processor.batch_decode(
-            gen, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )[0]
-        data = _parse_json_object(text_out) or {}
-        return _to_receipt(data, doc_id=doc_id or path, image_path=path)
+
+        # One greedy decode is the value source AND the confidence source: deterministic, so
+        # the extracted fields (and measured accuracy) are unchanged; the token logprobs that
+        # annotate confidence come free from the same pass — no extra inference.
+        text, token_conf = self._read_with_confidence(inputs)
+        receipt = _to_receipt(_parse_json_object(text) or {}, doc_id=doc_id or path, image_path=path)
+        receipt.field_confidence.update(token_conf)  # scalar logprob conf rides alongside line_items
+        return receipt
 
 
 def _importable(module: str) -> bool:

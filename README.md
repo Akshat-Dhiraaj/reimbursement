@@ -44,12 +44,13 @@ never the gate**.
 | Layer | Status | Evidence |
 |---|---|---|
 | Domain models + pluggable detector framework | ✅ Done | `models.py`, `detectors/base.py` |
-| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 81 tests; synthetic leaderboard |
+| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 140 tests; synthetic leaderboard |
 | Noisy-OR fusion + eval harness + CLI | ✅ Done | `slipguard eval` |
 | PDF provenance forensics (`pdf_meta`) | ✅ Done (shallow parse) | `slipguard eval-pdf` |
+| Image-EXIF provenance forensics (`image_meta`) | ✅ Done (EXIF only) | `slipguard eval-image` |
 | Real-data false-positive audit | ✅ Done (WildReceipt) | `slipguard eval-real` |
-| **Extraction route (photo/PDF → fields, OCR/VLM)** | 🔶 **Interface + guard + benchmark + first VLM extractor (Qwen2-VL-2B) done; OCR+KIE candidate next** | `slipguard eval-extract` → macro **0.725** |
-| Image forensics (AI-generated, tamper-localization) | ❌ Not started | declared in label space only |
+| **Extraction route (photo/PDF → fields, OCR/VLM)** | 🔶 **Two extractors benchmarked head-to-head: VLM (Qwen2-VL-2B) leads, docTR OCR+KIE second** | `slipguard eval-extract` → macro **VLM 0.725 / docTR 0.579** |
+| Image *pixel* forensics (AI-generated, tamper-localization) | ❌ Not started | declared in label space only |
 | Real fraud corpora + learned fusion | ❌ Not started | data gap (see DECISIONS) |
 
 **Honest caveat:** the synthetic benchmark scores ~1.0 AUC, but that only validates
@@ -61,12 +62,17 @@ nothing about real-world / AI-generated fraud. See §5.
 ```bash
 # Python 3.10+ (dev box 3.13). One runtime dependency: python-stdnum.
 pip install -e ".[dev]"
+# Image-route extractors are optional, heavy, and commercial-safe (Apache-2.0):
+#   pip install -e ".[vlm]"   # Qwen2-VL-2B end-to-end VLM extractor
+#   pip install -e ".[ocr]"   # docTR OCR + transparent keyword/position KIE
 
-python -m pytest                  # 81 tests
+python -m pytest                  # 151 tests
 slipguard eval                    # synthetic structured benchmark leaderboard
 slipguard eval-pdf                # synthetic PDF-provenance leaderboard
+slipguard eval-image              # synthetic image-EXIF provenance leaderboard (needs Pillow / [vlm])
 slipguard eval-real               # real-receipt false-positive audit (needs the corpus below)
-slipguard eval-extract            # rank extractors on field accuracy vs the WildReceipt oracle
+slipguard eval-extract            # rank IMAGE extractors (docTR vs VLM) on field accuracy vs the oracle
+slipguard eval-calibration        # does an extractor's per-value confidence predict a misread? (needs [vlm])
 slipguard score data/demo.json    # score one structured receipt JSON
 
 # Real corpus for eval-real (not committed; Apache-2.0):
@@ -81,13 +87,19 @@ tar -xf datasets/wildreceipt.tar -C datasets
   recall 1.0, 0 FP**. → *validates harness + logic, not real fraud.*
 - **Synthetic PDF provenance** (85 samples): `pdf_meta` AUC **1.0** / recall **1.0**
   / **0** FP over 45 provenance tampers, routed to **REVIEW**. → *same caveat.*
+- **Synthetic image-EXIF provenance** (70 samples): `image_meta` AUC **1.0** / recall
+  **1.0** / **0** FP over 30 tampers (editor tag in EXIF `Software` + capture/modify
+  date gap); structured detectors and `pdf_meta` correctly abstain on the IMAGE route.
+  → *same caveat, plus: real forgers often strip EXIF entirely (→ abstain), so this is
+  a corroborating signal, never the gate.*
 - **Real receipts** (WildReceipt test, 472 *genuine* receipts → every flag is a false
   positive): fused FP **0.364**, and it is **entirely** the `arithmetic` detector,
   **entirely** driven by lossy field extraction (the KIE oracle mislabels the "total"
   box / under-captures line items) — **not** arithmetic logic. `tax_id`, `pdf_meta`,
-  `duplicate` produce **0** false positives. **Conclusion: a faithful field extractor
-  is the binding constraint** — which is why the extraction route is the active
-  milestone. (Full reasoning in [ROADMAP.md](ROADMAP.md).)
+  `duplicate` produce **0** false positives. **Conclusion: extraction quality — not
+  detector logic — is the binding constraint** — which is why the extraction route is the
+  active milestone. (Full reasoning in [ROADMAP.md](ROADMAP.md); the re-extraction result
+  below sharpens *how*.)
 - **Extraction accuracy** (Qwen2-VL-2B-Instruct vs the WildReceipt oracle, 100 receipts):
   macro field-accuracy **0.725**, 0 extractor errors — vendor 0.880, date 0.915,
   subtotal 0.740, tax 0.614, total 0.598, line_count 0.602. Money/line-count are the
@@ -95,6 +107,44 @@ tar -xf datasets/wildreceipt.tar -C datasets
   not absolute truth: the oracle is itself imperfect (a money-parser bug it exposed —
   European decimal commas read 100× too high — is now fixed, and is what moved the audit
   FP 0.398 → 0.364).*
+- **Extractor head-to-head** (docTR OCR+KIE vs the VLM, *same* 100 receipts/denominators):
+  the end-to-end **VLM leads macro 0.725 vs docTR 0.579**, so the IMAGE route ships the VLM
+  — *by the numbers, not reputation.* The field-by-field read is the honest, non-obvious part:
+  docTR is **competitive on the money fields that drive arithmetic** (tax 0.600 vs 0.614;
+  **total 0.696, above the VLM's 0.598**) and trails mainly on **vendor** (0.380 vs 0.880) and
+  **line_count** (0.312 vs 0.602). A first, naive single-line KIE scored docTR a misleading
+  **0.244** — its OCR read every amount correctly, but docTR emits each summary row's *label*
+  and *right-column amount* as **separate** lines, so a same-line "keyword + money" rule read
+  `SUBTOTAL`/`TOTAL` as money-less and the stray digit in `TAX1` as `1.0`. A transparent
+  **row-merge** pre-pass (rejoin lines at the same height, x-ordered) lifted docTR **0.244 →
+  0.579** with no new model. → *the OCR substrate was never the bottleneck; the VLM's real
+  edge is needing no per-layout KIE heuristics, not raw money accuracy (date ties at 0.915 for
+  both — a date needs no label association).*
+- **Re-extracted FP, apples-to-apples** (`eval-real --extractor vlm --limit 100`, the
+  *same* 100 image-bearing receipts, `--today 2019-12-31`): re-reading every field with
+  the VLM *raises* the fused FP from the oracle's **0.400** to **0.740**. This is the
+  key, non-obvious lesson — **per-field accuracy ≠ cross-field arithmetic consistency.**
+  The VLM reads *more* fields than the oracle (date 93 vs 47, subtotal 96 vs 77 of 100),
+  and higher coverage gives `arithmetic`/`date_sanity` *more to check*, while a
+  subtotal-to-sum reconciliation needs **every** line item correct — so one misread line
+  breaks the whole receipt (`subtotal≠Σlines` 15→50; `line≠qty·price` 0→18, which the
+  oracle's qty=1/unit=amount rows can't even trip). The parse-completeness guard abstains
+  only 4%: it sees emitted-but-*unparseable* items, not a **confidently-wrong** read. →
+  *so the binding constraint is a faithful extractor* **plus per-value confidence**;
+  coverage alone makes FP worse.
+- **Per-value confidence — token logprobs + a calibration study, measured (2026-06):** the VLM
+  emits a per-token-logprob confidence for subtotal/tax/total (free — same greedy pass; the
+  digits' least-confident token). At the principled **0.5** abstain floor it does **not** lower
+  FP (it catches only **18%** of misreads — they clear the floor), which first read as "the
+  misreads are just confident." But the calibration study (`eval-calibration`, the same 100
+  receipts, 222 scored money reads vs the oracle) shows the signal is **far from uninformative:
+  AUC 0.758** that a read disagrees with the oracle (per field 0.77–0.83), with a **monotonic
+  reliability curve** — accuracy climbs 0.37 (conf <0.6) → 0.71 (0.8–0.9) → 0.87 (0.9–1.0). So
+  the honest, refined verdict: the *signal* is genuinely good; the *0.5 threshold* was simply too
+  low. There is still no free lunch — every abstain threshold trades misread-recall for
+  dropped-correct reads (T=0.7 catches 51% of misreads but drops 17% of good ones), and the
+  arithmetic-breaking misreads skew confident. → *a measured, genuinely useful calibrated
+  per-value feature for cost-aware learned fusion (M3) — not a standalone unsupervised gate.*
 
 ## 6. Repository layout
 
@@ -106,11 +156,11 @@ src/slipguard/
   money.py         parse_money(): shared US/EU-aware money parser (oracle + VLM extractor)
   extractors/      one file per extraction approach (StructuredExtractor, Qwen2-VL) + ABC + registry
   detectors/       one file per detection method + the Detector ABC + registry
-  forensics/       dependency-free PDF provenance inspector
+  forensics/       provenance inspectors: PDF (dependency-free bytes) + image EXIF (Pillow)
   data/            synthetic generators + real-corpus loaders (WildReceipt)
-  eval/            metrics, ranking harness, false-positive audit, extraction-accuracy benchmark
-  cli.py           `slipguard eval | eval-pdf | eval-real | eval-extract | score`
-tests/             81 tests
+  eval/            metrics, ranking harness, false-positive audit, extraction-accuracy + confidence-calibration benchmarks
+  cli.py           `slipguard eval | eval-pdf | eval-image | eval-real | eval-extract | eval-calibration | score`
+tests/             151 tests
 ```
 
 ## 7. Licence posture (summary)

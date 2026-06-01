@@ -25,6 +25,7 @@ from typing import Iterable, Optional, Sequence
 from ..detectors.duplicate import _norm_vendor  # alnum-lowercase normaliser (DRY)
 from ..extractors.base import Extractor
 from ..models import Receipt
+from ..money import money_close
 
 #: Receipt money fields scored numerically with a tolerance.
 _MONEY_FIELDS = ("subtotal", "tax_amount", "total")
@@ -54,11 +55,12 @@ def _vendor_ok(pred: Optional[str], truth: str, ratio: float = 0.8) -> bool:
 
 
 def _money_ok(pred: Optional[float], truth: float, rel: float = 0.01, abs_tol: float = 0.02) -> bool:
-    """Money match within the larger of an absolute and a relative tolerance —
-    mirrors the slack the ``arithmetic`` detector allows for rounding."""
+    """Money match within the larger of an absolute and a relative tolerance (shared
+    ``money_close``) — mirrors the slack the ``arithmetic`` detector allows for rounding.
+    A missing prediction (``None``) is always a miss."""
     if pred is None:
         return False
-    return abs(pred - truth) <= max(abs_tol, rel * abs(truth))
+    return money_close(pred, truth, rel=rel, abs_tol=abs_tol)
 
 
 @dataclass

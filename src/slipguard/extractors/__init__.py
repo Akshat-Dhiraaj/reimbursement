@@ -11,12 +11,13 @@ from typing import Optional
 
 from ..models import DocumentType
 from .base import Extractor
+from .doctr_ocr import DocTROCRExtractor
 from .structured import StructuredExtractor
 from .vlm_qwen import QwenVLExtractor
 
 __all__ = [
-    "Extractor", "StructuredExtractor", "QwenVLExtractor",
-    "default_extractors", "image_extractors", "extractor_for",
+    "Extractor", "StructuredExtractor", "QwenVLExtractor", "DocTROCRExtractor",
+    "default_extractors", "image_extractors", "image_extractor_for_spec", "extractor_for",
 ]
 
 
@@ -27,11 +28,29 @@ def default_extractors() -> list[Extractor]:
 
 
 def image_extractors(model: Optional[str] = None) -> list[Extractor]:
-    """Candidate IMAGE-route extractors, ranked head-to-head by ``eval-extract``.
-    Construction is cheap (no model load); each declares ``available()`` so an
-    un-runnable candidate is skipped with a reason rather than crashing.
-    ``model`` overrides the VLM checkpoint id."""
-    return [QwenVLExtractor(model_id=model) if model else QwenVLExtractor()]
+    """Candidate IMAGE-route extractors, ranked head-to-head by ``eval-extract``: the
+    end-to-end VLM and the OCR+KIE pipeline, two different paradigms on the same oracle.
+    Construction is cheap (no model load); each declares ``available()`` so an un-runnable
+    candidate is skipped with a reason rather than crashing. The VLM is listed first so it
+    stays ``score``'s default until the leaderboard names a winner. ``model`` overrides the
+    VLM checkpoint id (docTR ignores it — it picks det/reco arches, not an HF id)."""
+    return [
+        QwenVLExtractor(model_id=model) if model else QwenVLExtractor(),
+        DocTROCRExtractor(),
+    ]
+
+
+def image_extractor_for_spec(spec: str) -> Extractor:
+    """Resolve an ``eval-real --extractor`` spec to exactly ONE image extractor: ``doctr``
+    -> the OCR+KIE pipeline, ``vlm`` -> the default VLM checkpoint, anything else -> a VLM
+    on that HF checkpoint id. (eval-real audits one extractor at a time; using a spec map —
+    not "first runnable" over :func:`image_extractors` — means ``--extractor vlm`` returns
+    the VLM rather than whichever extractor happens to come first in the list.)"""
+    if spec == "doctr":
+        return DocTROCRExtractor()
+    if spec == "vlm":
+        return QwenVLExtractor()
+    return QwenVLExtractor(model_id=spec)
 
 
 def extractor_for(

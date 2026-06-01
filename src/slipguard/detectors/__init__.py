@@ -8,6 +8,7 @@ from .arithmetic import ArithmeticConsistencyDetector
 from .base import Detector
 from .datesanity import DateSanityDetector
 from .duplicate import DuplicateDetector
+from .imagemeta import ImageMetadataDetector
 from .pdfmeta import PdfMetadataDetector
 from .taxid import TaxIdValidationDetector
 
@@ -19,6 +20,7 @@ def default_detectors() -> list[Detector]:
         DateSanityDetector(),
         DuplicateDetector(),
         PdfMetadataDetector(),
+        ImageMetadataDetector(),
     ]
 
 
@@ -29,5 +31,6 @@ __all__ = [
     "DateSanityDetector",
     "DuplicateDetector",
     "PdfMetadataDetector",
+    "ImageMetadataDetector",
     "default_detectors",
 ]

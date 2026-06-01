@@ -24,7 +24,7 @@ class FraudType(str, Enum):
     DATE = "date"                    # impossible or implausible date
     TAX_ID = "tax_id"               # malformed / wrong-checksum tax id
     DUPLICATE = "duplicate"          # resubmission of an existing receipt
-    METADATA = "metadata"            # PDF provenance: edited-after-write / editor tags
+    METADATA = "metadata"            # provenance: edited-after-write / editor tags (PDF or image EXIF)
     AI_GENERATED = "ai_generated"    # whole image synthesised (image route, later)
     IMAGE_TAMPER = "image_tamper"    # local edit / inpaint (image route, later)
 

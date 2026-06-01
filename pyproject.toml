@@ -22,6 +22,14 @@ vlm = [
     "accelerate>=0.26",
     "pillow>=10",
 ]
+# The docTR OCR+KIE image extractor — the VLM's head-to-head rival on the IMAGE route.
+# Apache-2.0, and reuses the same torch as [vlm]. Kept a separate extra so an OCR-only
+# install skips the transformers/accelerate VLM stack (and vice versa).
+ocr = [
+    "python-doctr>=1.0",
+    "torch>=2.1",
+    "torchvision",
+]
 
 [project.scripts]
 slipguard = "slipguard.cli:main"
