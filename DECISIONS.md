@@ -87,6 +87,25 @@ fuser (§1.5, M3), which is exactly the labelled per-detector signal that fuser 
 unsupervised gate. **Alternative rejected:** self-consistency sampling (K× cost, misses stable
 misreads) and a fixed unsupervised abstain threshold (no single cutoff helps, per the sweep).
 
+### 1.8 Born-digital PDFs read their *text layer* (exact), via the same shared KIE as OCR
+**Decision:** the PDF route's extractor (`PdfTextExtractor`, pypdfium2) reads a PDF's
+**embedded text layer** — extracting per-line text rects and their geometry — and feeds them
+into the **same** keyword/position KIE (`extractors/kie.py`) that the docTR OCR route uses,
+rather than rasterising every PDF and OCR-ing it. Read text is exact, so its `Line.conf` is a
+constant **1.0** (the arithmetic confidence-guard stays off — there's no misread to hedge).
+**Why:** most reimbursement PDFs (ERP/portal exports: ERPNext, SAP, Tally) are born-digital
+with a perfect text layer — OCR-ing them would *inject* error into data that is already exact,
+and burn a GPU pass for nothing. Reusing the KIE was the point of factoring `receipt_from_lines`
+out of docTR: one paradigm-agnostic label/position reader now serves OCR boxes *and* PDF text
+rects, so a born-digital PDF scores **end-to-end** (arithmetic / tax_id / date_sanity / duplicate
+all run on it — previously the PDF route had provenance forensics only, so the content detectors
+never fired on a PDF). **Honest limitation:** a **scanned-image PDF** has no text layer → empty
+read → it belongs on the IMAGE/OCR route. We don't paper over this with a silent
+rasterise-then-OCR fallback; that's deliberate **future work** ([ROADMAP.md](ROADMAP.md)), and
+until then such a PDF yields an empty Receipt rather than a fabricated one. **Alternative
+rejected:** rasterise-every-PDF-then-OCR (slower, lossy on the 95% born-digital case, GPU-bound)
+and a bespoke PDF field parser (would duplicate the KIE logic that OCR already needs).
+
 ---
 
 ## 2. Libraries / models / techniques
@@ -95,14 +114,17 @@ misreads) and a fixed unsupervised abstain threshold (no single cutoff helps, pe
 |---|---|---|
 | **`python-stdnum`** (tax-id checksums) | ✅ Used | Authoritative GSTIN/VAT format+checksum, tiny, LGPL (fine as a dependency). Hand-rolling check digits is error-prone and pointless. |
 | **Dependency-free PDF parser** (raw bytes + regex over the Info dict) | ✅ Used for v1 | Zero runtime deps, fully commercial-safe, and the highest-yield signals (`%%EOF` count, editor tags, date gap) are visible in plain bytes. |
-| **pikepdf / pdfid** (xref-stream, compressed/XMP metadata, text-over-scan) | ⏳ Deferred | Needed to decode modern compressed PDFs the regex parser can't read, but adds a dependency and isn't required for the cheap wins. Scheduled, not skipped. |
+| **pikepdf** (deep PDF forensics: xref-stream / compressed / XMP metadata + structure) | ✅ **In use** (Layer 2) | **MPL-2.0**, a qpdf binding (~3 MB wheel) — commercial-safe and deliberately **not** AGPL PyMuPDF. The byte regex (Layer 1) is blind on modern **compressed** PDFs (PDF 1.5+ keeps the Info dict in an object stream, metadata only in XMP) — exactly the real ERP/portal export shape. pikepdf decodes those, so it **recovers the editor tag / date gap Layer 1 misses** and adds structural anomalies (AcroForm, JavaScript, OpenAction, overlay annotations). Measured on a minted compressed corpus (`eval-pdf-forensics`): `pdf_meta` target-recall **0.000 → 0.833** byte-only→deep, fused **recall 1.000 / FP 0.000** — the recall the extra buys. Optional `[pdf-forensics]` extra (separate from `[pdf]` text extraction — forensics vs. field-reading are independent concerns); `pdfmeta` falls back to Layer 1 and never crashes when it's absent. |
+| **Text-over-scan flag** (a text layer sitting atop a scanned page image) | ❌ **Deferred** (not a structural flag) | Tempting as a "retyped over the scan" tamper signal, but it **collides with legitimate OCR'd / searchable scans** (every "Scan to searchable PDF" output is text-over-image) → unacceptable false positives as a hard structural flag. The honest home for it is the M3 pixel/layout route as a *calibrated weak* signal, not the provenance layer. Skipped deliberately, with the reason recorded. |
+| **pypdfium2** (born-digital PDF *text-layer* read for the PDF extraction route) | ✅ **In use** | **Apache-2.0 / BSD-3-Clause** (bundles Google's PDFium, BSD-3-Clause) — fully commercial-safe, CPU-only, light. Returns per-line text rects + page geometry, which map cleanly into the shared KIE's `Line` contract. Kept an optional `[pdf]` extra so the core install stays dependency-free; the extractor reports it missing via `available()`. First measured result: round-trip **macro 0.992** on minted text PDFs. |
+| **PyMuPDF / fitz** (the popular PDF text/render lib) | ❌ **Avoided** | **AGPL-3.0** (or a paid commercial licence) — copyleft that would reach a shipping internal product. pypdfium2 gives the text-layer read we need under a permissive licence, so the AGPL risk is simply unnecessary. |
 | **Noisy-OR fusion** | ✅ Used now | See §1.5. |
 | **Learned/calibrated fuser** | ⏳ Planned (M3) | Needs measured per-detector performance first; premature now. The first calibrated input now exists — the VLM's per-value confidence (AUC 0.758 vs oracle, §1.7) — which is exactly the kind of measured feature the fuser will consume. |
 | **LayoutLMv3** (document KIE) | ❌ Avoided | Licence **CC-BY-NC** — non-commercial; unusable in a shipping product. |
 | **Surya** (OCR) | ❌ Avoided | **GPL** — copyleft; incompatible with a closed internal product. |
 | **docTR** (OCR + transparent keyword/position KIE) | ✅ **In use** (benchmarked 2nd) | **Apache-2.0**, commercial-safe. Landed as the OCR+KIE counterpoint to the VLM so the IMAGE route is *picked by numbers, not reputation*: two-stage text detection+recognition + a transparent same-row "keyword + money" KIE. On the **same** 100 receipts it scores **macro 0.579 vs the VLM's 0.725 → the VLM ships**, but the field read is the honest part — docTR is **competitive on the arithmetic-driving money fields** (tax 0.600 ≈ VLM 0.614; **total 0.696 > VLM 0.598**) and trails on vendor (0.380) + line_count (0.312). A first naive single-line KIE mis-scored it **0.244**: docTR's OCR read every amount correctly (date ties the VLM at 0.915), but it emits each summary row's *label* and *right-column amount* as **separate** lines, so a same-line rule read `SUBTOTAL`/`TOTAL` as money-less and the stray digit in `TAX1` as `1.0`. A transparent **row-merge** pre-pass (rejoin same-height lines, x-ordered so the amount stays right-most) lifted it **0.244 → 0.579** with no new model. KIE is still English-keyword heuristic (German *Netto/MwSt/Summe* miss). PaddleOCR/PP-Structure remains a future candidate, same contract. |
 | **Qwen-VL** (VLM extraction; default **Qwen2-VL-2B-Instruct**) | ✅ **In use** | Apache-2.0 *and* fits the 8 GB dev GPU natively. Licence verified per checkpoint against HF metadata: 2.5-VL-**7B** + 2-VL-**2B** are Apache-2.0; **2.5-VL-3B has no declared licence → rejected** (unclear = unusable, same posture as FUNSD/Find-it-again!). Loaded via transformers Auto classes so any HF VLM is a swappable candidate; ranked by `eval-extract` → first measured result **macro 0.725** field-accuracy on 100 real receipts (0 errors; vendor 0.880 / date 0.915 / money fields 0.60–0.74). |
-| **Shared `money.parse_money`** (US/EU-aware money parser) | ✅ Used | One parser for **both** the WildReceipt oracle and the VLM extractor (DRY). A naive comma-stripper read European decimals (`Eur129,75`) 100× too high and corrupted *both* `eval-extract` and the FP audit; the fix treats the rightmost separator as the decimal point only with 1-2 trailing digits, else thousands grouping (`1,234.56`, `1.234,56`, `1,23,456.78`, `.70`). |
+| **Shared `money.parse_money`** (US/EU-aware money parser) | ✅ Used | One parser for **all** money strings — the WildReceipt + CORD oracles and the VLM extractor (DRY). A naive comma-stripper read European decimals (`Eur129,75`) 100× too high and corrupted *both* `eval-extract` and the FP audit; the fix treats the rightmost separator as the decimal point only with 1-2 trailing digits, else thousands grouping (`1,234.56`, `1.234,56`, `1,23,456.78`, `.70`). **CORD then exposed a sibling 1000× bug:** the Indonesian `Rp.` currency-prefix dot fused with the digits and the leftmost bare-decimal branch read `Rp.118.000` as `118.0`; fixed with a negative lookbehind (`(?<![\w.])`) so a dot preceded by a letter/digit can't begin a decimal, while genuine bare decimals (`.70`, `$.70`) still parse. Same lesson both times: a too-extreme number is a cue to audit the parser, not the data. |
 | **CLIP / ViT AI-image detectors** (e.g. C2P-CLIP, Community Forensics) | 🔜 Planned as *weak* signal | Permissive; but per §1.2 only ever a calibrated weak input, evaluated honestly under laundering. |
 
 ---
@@ -115,9 +137,9 @@ the harness, and use **real legitimate** corpora to measure false positives.
 
 | Dataset | Licence | Decision | Why |
 |---|---|---|---|
-| **WildReceipt** | Apache-2.0 | ✅ **In use** | Real receipts with human KIE labels → an *oracle extractor* (reconstruct `Receipt`s without OCR) to measure real-world FP rate. Commercial-safe. |
-| **CORD** | CC-BY-4.0 | 🔜 Planned | Real receipts with parses; commercial-safe; adds variety for FP + extraction eval. |
-| **ExpressExpense** | MIT | 🔜 Candidate | Real receipt images; permissive; useful once the image/extraction route exists. |
+| **WildReceipt** | Apache-2.0 | ✅ **In use** | Real receipts with human KIE labels → an *oracle extractor* (reconstruct `Receipt`s without OCR) to measure real-world FP rate (US English). Commercial-safe. |
+| **CORD** (naver-clova-ix/cord-v2) | CC-BY-4.0 | ✅ **In use** | A *second oracle* corpus: Indonesian receipts whose human `gt_parse` (menu/sub_total/total) reconstructs a `Receipt` like WildReceipt's KIE. Adds locale variety **and** isolates a different FP cause — its clean labels showed the FP is a too-narrow 3-field model, not lossy extraction (see §4). No vendor/date in the labels (those detectors abstain); IDR/ID (GSTIN abstains). Lazy `datasets` fetch, git-ignored cache. **Measured oracle FP 0.170, entirely `arithmetic`.** |
+| **ExpressExpense** | MIT | ✅ **In use** (re-extraction only) | 200 real receipt **images, no field labels** — so it can feed the FP audit *only* via real-extractor re-extraction (`eval-real --extractor vlm/doctr`), and is **rejected** by the oracle-scored `eval-extract`/`eval-calibration`. Broadens image-route variety; permissive (MIT). |
 | **FUNSD** | CC-BY-**NC** | ❌ Rejected | Non-commercial. |
 | **INV-CDIP** | CC-BY-**NC** | ❌ Rejected | Non-commercial. |
 | **DocTamper** | Non-commercial | ❌ Rejected | NC licence; also tamper-localization which we treat as a weak signal only. |
@@ -138,4 +160,12 @@ same discipline turned on our *own* ground truth: the first VLM run disagreed wi
 oracle on European-decimal receipts, and on inspection the **oracle** was wrong (a
 comma-stripping parser read `129,75` as `12975`), not the model — so we fixed the oracle
 (shared `money.parse_money`), which is what moved the audit FP from 0.398 to 0.364. We
-trust measured disagreement enough to audit the reference, not just the candidate.
+trust measured disagreement enough to audit the reference, not just the candidate. The
+same discipline added a **second** real corpus precisely to test whether the WildReceipt
+finding generalised: CORD (Indonesian, clean `gt_parse` labels) reports FP **0.170**, again
+entirely `arithmetic` — but because its labels are *not* lossy, it isolates a **different**
+true cause (our 3-field `subtotal/tax/total` model can't represent service-charge / discount /
+tax-inclusive totals). Two corpora, two mechanisms, one conclusion — **the binding constraint
+is representation/extraction completeness, not detector logic** — is a stronger, more honest
+claim than either alone, and it names a concrete fix (a richer Receipt model) rather than hiding
+the flags. (CORD also surfaced — and we fixed — a 1000× `Rp.`-prefix money-parser bug; §2.)

@@ -44,6 +44,20 @@ def test_decimal_vs_thousands_is_decided_by_trailing_digit_count():
     assert parse_money("129,750") == 129750.0
 
 
+def test_currency_prefix_dot_is_not_a_decimal_point():
+    # Regression: CORD's Indonesian-Rupiah amounts are written "Rp.118.000". The "Rp." dot
+    # fused with the digits and the leftmost bare-decimal match read ".118" as 118.0 — a
+    # 1000x error (118 000 IDR became 118.0). The leading-dot branch now requires the dot
+    # not be preceded by a letter/digit, so the digit-led group wins instead.
+    assert parse_money("Rp.118.000") == 118000.0
+    assert parse_money("Rp.56.000") == 56000.0
+    assert parse_money("Rp 138.000") == 138000.0
+    assert parse_money("Rp.0") == 0.0
+    # ...without regressing genuine bare decimals where the dot starts the number.
+    assert parse_money("$.70") == 0.70
+    assert parse_money(".70") == 0.70
+
+
 def test_negative_and_sign():
     assert parse_money("-3.50") == -3.5
     assert parse_money("-1.234,56") == -1234.56

@@ -23,7 +23,12 @@ from typing import Optional
 
 #: first number-like run: a digit-led group (which may carry ``,``/``.`` groupings) or a
 #: leading-dot value like ``.70``. Lets us pull the number out of ``Eur129,75`` / ``$5.33``.
-_TOKEN_RE = re.compile(r"-?\d[\d.,]*|-?\.\d+")
+#: The leading-dot branch carries a negative lookbehind so a *currency-prefix* dot can't be
+#: mistaken for a decimal point: in the Indonesian ``Rp.118.000`` the ``Rp.`` dot would
+#: otherwise let ``.118`` win (leftmost match) and read 118 000 as 118.0 — a 1000x error
+#: that CORD exposed. Requiring the dot to be preceded by neither a letter/digit nor another
+#: dot keeps genuine bare decimals (``.70``, ``$.70``) while skipping ``Rp.``/``Rs.`` prefixes.
+_TOKEN_RE = re.compile(r"-?\d[\d.,]*|(?<![\w.])-?\.\d+")
 
 
 def parse_money(text: object) -> Optional[float]:

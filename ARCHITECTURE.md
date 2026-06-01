@@ -12,12 +12,12 @@ harness on measured performance.
 ```mermaid
 flowchart TD
     A[Raw submission<br/>PDF / photo / structured JSON] --> R{routing.route_path}
-    R -->|PDF| XP[Extractor route<br/>OCR/VLM — planned]
+    R -->|PDF| XP[PdfTextExtractor<br/>born-digital text — live]
     R -->|IMAGE| XV[VLM extractor<br/>Qwen2-VL-2B — live]
     R -->|STRUCTURED| SE[StructuredExtractor<br/>live]
     SE --> RC[Receipt<br/>normalised fields]
     XV --> RC
-    XP -.planned.-> RC
+    XP --> RC
 
     RC --> D[default_detectors&#40;&#41;<br/>run each Detector independently]
 
@@ -61,7 +61,7 @@ photos are deliberately routed apart so each gets its own provenance forensics
 (PDF structure vs. image EXIF). **Only the routing decision lives here**; the
 extractors and route-specific detectors plug in behind it.
 
-### 2.2 Extraction — `extractors/` (STRUCTURED + IMAGE live; PDF pending)
+### 2.2 Extraction — `extractors/` (STRUCTURED + IMAGE + PDF live)
 This stage turns a raw document into a `Receipt`. Every approach implements one
 **`Extractor`** contract (mirroring `Detector`): `name`, `handles` (routes), and
 `extract(path) -> Receipt`. `extractor_for(route)` picks the registered extractor,
@@ -73,10 +73,22 @@ route; the IMAGE route has **two** benchmarked extractors: the **`QwenVLExtracto
 `--model` candidate), and the **`DocTROCRExtractor`** (`doctr_ocr.py`, Apache-2.0) runs a
 two-stage OCR (text detection+recognition) feeding a transparent keyword/position KIE.
 Both keep torch/transformers/PIL/doctr imports lazy so the package stays import-light. The
-**PDF route** still returns an explicit "no extractor registered" until an OCR/VLM PDF
-extractor lands (plan in [ROADMAP.md](ROADMAP.md)). Extractors are ranked head-to-head on
+**PDF route** is now live too: **`PdfTextExtractor`** (`pdf_text.py`, pypdfium2,
+Apache-2.0/BSD-3-Clause) reads a born-digital PDF's **embedded text layer** — pypdfium2
+returns one rect per line in PDF points (bottom-left origin), which `_lines_from_rects`
+maps into the shared KIE's page-fraction `Line` contract (`y = 1 − top/height`,
+`x = left/width`) at **confidence 1.0** (exact text, not OCR). Honest limit: it reads the
+text layer only, so a **scanned-image PDF** (no text layer) yields an empty Receipt and
+belongs on the IMAGE/OCR route — rasterise-then-OCR is future work ([ROADMAP.md](ROADMAP.md)).
+This is the payoff of factoring the KIE out of docTR into **`kie.py`** (`receipt_from_lines`):
+the same paradigm-agnostic label/position logic now serves OCR boxes *and* PDF text rects, so
+a born-digital PDF scores end-to-end (arithmetic / tax_id / date_sanity / duplicate now run on
+it, not just `pdf_meta`). Extractors are ranked head-to-head on
 field accuracy by `eval/extraction.py`: on the same 100 receipts **Qwen2-VL-2B leads at
 macro 0.725, docTR second at 0.579** (so the IMAGE route ships the VLM — by the numbers).
+The PDF route is measured on its own minted oracle (`eval-pdf-extract`): a known Receipt is
+rendered to a real text PDF and read back, scoring **macro 0.992** (date / subtotal / tax /
+total / line-count all 1.000; **vendor 0.950**, the only miss — see §2.2.1).
 docTR's OCR is sound (it ties the VLM on date at 0.915 and *beats* it on `total`); a
 **row-merge** pre-pass (`_merge_rows`) was needed first because docTR emits a row's label
 and its right-column amount as separate lines — without it the single-line KIE scored a
@@ -109,6 +121,18 @@ never emitted.) The real-data audit uses WildReceipt's human KIE annotations as 
 (`data/wildreceipt.py`) whose fields carry no confidence and so read as trusted; the audit's
 **0.364** arithmetic FP only drops once an extractor supplies low confidence on the boxes
 *it* misreads.
+
+#### 2.2.1 Honest read of the PDF route's one miss — a KIE labelling limit, not a read failure
+The PDF round-trip's only sub-1.0 field is **vendor (0.950 = 38/40)**. The text is read
+*perfectly* — both misses are a **labelling** artifact in the shared KIE, not lost characters.
+The vendor heuristic picks the longest alphabetic line in the top band; on a **short** receipt
+(few line-items) an item line lands inside that band, and a short store name loses the
+letter-count tie — e.g. `truth='Croma'` (5 letters) is out-lettered by an item line
+`'Coffee 47.53'` / `'Stapler 6.68'`. So the ceiling here is the **paradigm-agnostic KIE's
+vendor rule**, shared with the OCR route — improving it (e.g. weight position over raw length,
+or exclude price-shaped lines from the vendor candidates) lifts *both* routes at once. We
+**measure** this rather than assert it: the round-trip test deliberately checks only the numeric
+fields + date (which survive on every receipt), and the docs report the true cause.
 
 ### 2.3 The `Receipt` contract — `models.py`
 The normalised unit every detector reads. Key fields: `vendor_name`, `date`,
@@ -154,7 +178,7 @@ irrelevant ones polluting the risk score (e.g. `tax_id` abstains on a US receipt
 | **tax_id** | `country`, `vendor_tax_id` | GSTIN/VAT fails format/checksum (`python-stdnum`) | unsupported country or no tax-id |
 | **date_sanity** | `date` | future date (0.92), or > 5y old (0.6, weak) | no date |
 | **duplicate** | `vendor`, `date`, `total` vs primed history | exact (vendor,date,total) match, or fuzzy vendor + same date + ~amount | no total |
-| **pdf_meta** | `source_path` (PDF bytes) | incremental update (extra `%%EOF`), editor tag in `/Producer`·`/Creator`, or ModDate ≫ CreationDate | non-PDF route, no source file |
+| **pdf_meta** | `source_path` (PDF bytes; + pikepdf deep layer when `[pdf-forensics]` present) | **L1 bytes:** incremental update (extra `%%EOF`), editor tag in `/Producer`·`/Creator`, ModDate ≫ CreationDate. **L2 pikepdf:** the editor tag / date gap recovered from compressed object-stream + XMP metadata, plus structural anomalies — JavaScript, OpenAction, AcroForm, overlay annotations | non-PDF route, no source file |
 | **image_meta** | `source_path` (image EXIF, via Pillow) | image editor in EXIF `Software` (Photoshop/GIMP/…), or `DateTime` ≫ `DateTimeOriginal` (capture-vs-modify gap) | non-IMAGE route, no source file, Pillow absent, or **no EXIF** (stripped/screenshot/AI — not guilt) |
 
 Each is single-purpose by design: it scores high on *its* subtype and abstains or
@@ -183,20 +207,47 @@ harness gives us measured per-detector performance to fit on (see ROADMAP).
 - `audit.py` — `audit_false_positives()` runs detectors+fuser over an all-legitimate
   corpus and reports fused FP rate, per-detector abstain/flag rates, extractor field
   coverage, and a categorised breakdown of *why* `arithmetic` fired (lossy extraction
-  vs. genuine contradiction). Backs `slipguard eval-real`.
+  vs. genuine contradiction). Backs `slipguard eval-real`, which runs it over any of three
+  real corpora via `--corpus {wildreceipt,cord,expressexpense}` (`data/*.py` loaders).
+  Two oracle corpora make the result robust: WildReceipt (US KIE) FP **0.364** traces to
+  *lossy extraction*, while CORD (Indonesian gt_parse, clean labels) FP **0.170** traces to a
+  *too-narrow 3-field model* (service-charge / discount / tax-inclusive totals it can't
+  represent) — different mechanisms, same conclusion: **the binding constraint is representation
+  completeness, not detector logic**.
 - `extraction.py` — `evaluate_extractors()` ranks extractors by field-level accuracy
   (vendor / date / subtotal / tax / total / line-count) against the WildReceipt oracle:
   the oracle Receipt is the reference, a candidate OCR/VLM extractor's output is the
   prediction, and a field is scored only when the oracle has a value for it. Money uses
   the same tolerance as `arithmetic`; vendor uses the duplicate detector's normaliser.
   Backs `slipguard eval-extract`. **This is the extractor selector**, mirroring `harness.py`.
+  The **PDF route** reuses the very same `evaluate_extractors`, but against a *minted* oracle:
+  `data/pdfsynth.generate_pdf_extraction` renders **known** Receipts to real born-digital text
+  PDFs, so the ground truth is exact (not human-annotated) and a perfect read should score ~1.0.
+  Backs `slipguard eval-pdf-extract`; measured **macro 0.992** (the one gap is vendor — §2.2.1).
 
 ### 2.9 Forensics — `forensics/pdf.py`, `forensics/image.py`
-`inspect_pdf(bytes_or_path)` → `PdfProvenance` (eof_count, producer, creator,
-creation/mod dates, matched editor tag, date-gap days). **Dependency-free**: raw
-bytes + regex over the literal Info dict. It never raises. Limitation: it does *not*
-yet decode xref-stream / compressed / XMP metadata (those need pikepdf/pdfid); on
-such PDFs the string fields read `None` while the `%%EOF` count stays reliable.
+PDF provenance is **two layers, by design**, so the cheap path needs no dependency and
+the deep path is an optional extra:
+
+* **Layer 1 — `inspect_pdf(bytes_or_path)` → `PdfProvenance`** (eof_count, producer,
+  creator, creation/mod dates, matched editor tag, date-gap days). **Dependency-free**:
+  raw bytes + regex over the literal Info dict. Never raises. Its blind spot is a modern
+  **compressed** PDF (PDF 1.5+ stores the Info dict in an object/xref stream, metadata may
+  live only in XMP) — there the string fields read `None`, while the `%%EOF` count (the
+  incremental-update signal) stays reliable. Most real ERP/portal exports are exactly such
+  compressed PDFs.
+* **Layer 2 — `inspect_pdf_deep(bytes_or_path)` → `DeepPdfProvenance | None`** (the optional
+  `[pdf-forensics]` extra, **pikepdf** — MPL-2.0, a qpdf binding, deliberately *not* AGPL
+  PyMuPDF). Decodes object/xref streams + XMP, so it **recovers the editor tag / date gap
+  Layer 1 misses on compressed PDFs**, and surfaces structural anomalies: a fillable
+  AcroForm, embedded JavaScript, an auto-run OpenAction, and cover-and-relabel overlay
+  annotations (FreeText/Redact/Stamp/Square/Highlight). The import is lazy and gated by
+  `pikepdf_available()`; it returns `None` (never raises) when the extra is absent or the
+  file won't open, so `pdf_meta` transparently falls back to Layer 1. Measured contrast on
+  a minted compressed corpus (`eval-pdf-forensics`): `pdf_meta` recall **0.000 → 0.833**
+  byte-only→deep, **fused recall 1.0 / 0 FP**. **Deferred (honest scope):** a
+  *text-over-scan* flag — it collides with legitimate OCR'd/searchable scans (high FP), so
+  it belongs in the M3 pixel/layout route as a weak signal, not as a structural flag.
 
 `inspect_image(path)` → `ImageProvenance` (has_exif, software, make/model, capture &
 modify timestamps, matched editor tag, date-gap days) — the EXIF sibling of the PDF
@@ -218,36 +269,41 @@ src/slipguard/
   combine.py              noisy_or(): the shared probability-combination rule
   money.py                parse_money(): shared US/EU-aware money parser (oracle + VLM extractor)
   fusion.py               Fuser: noisy-OR risk + APPROVE/REVIEW/REJECT
-  cli.py / __main__.py    eval | eval-pdf | eval-image | eval-real | eval-extract | score
+  cli.py / __main__.py    eval | eval-pdf | eval-pdf-forensics | eval-image | eval-real --corpus … | eval-extract | eval-pdf-extract | eval-calibration | score
   extractors/
-    base.py               Extractor ABC (handles / can_handle / extract -> Receipt)
+    base.py               Extractor ABC (handles / can_handle / extract -> Receipt; available())
+    kie.py                shared keyword/position KIE: Line(text,y,conf,x) -> receipt_from_lines() (docTR + PDF)
     structured.py         StructuredExtractor: Receipt JSON -> Receipt (dependency-free)
     vlm_qwen.py           QwenVLExtractor: image -> Receipt via Qwen2-VL (lazy torch/transformers)
-    __init__.py           default_extractors() + extractor_for(route) registry
+    doctr_ocr.py          DocTROCRExtractor: image -> OCR boxes -> shared KIE (lazy torch/doctr)
+    pdf_text.py           PdfTextExtractor: born-digital PDF text rects -> shared KIE (lazy pypdfium2)
+    __init__.py           default/image/pdf_extractors() + extractor_for(route) registry
   detectors/
     base.py               Detector ABC (applicable/prime/score/run/_abstain)
     arithmetic.py         line items -> subtotal -> tax -> total reconciliation
     taxid.py              python-stdnum GSTIN (IN) + EU VAT; abstains if unsupported
     datesanity.py         future / implausibly-old dates (today injectable)
     duplicate.py          exact + fuzzy resubmission match; prime()-d with history
-    pdfmeta.py            PDF provenance signal (reads forensics.inspect_pdf)
+    pdfmeta.py            PDF provenance signal (byte inspect_pdf + pikepdf inspect_pdf_deep; use_deep knob)
     imagemeta.py          image EXIF provenance signal (reads forensics.inspect_image)
     __init__.py           default_detectors() — the canonical ranked set
   forensics/
-    pdf.py                dependency-free PDF provenance inspector
+    pdf.py                PDF provenance: L1 dependency-free bytes + L2 pikepdf deep (optional [pdf-forensics])
     image.py              image EXIF provenance inspector (Pillow, lazy)
   data/
     synth.py              synthetic structured clean+fraud generator
-    pdfsynth.py           synthetic PDF generator (byte layout) + 3 provenance tampers
+    pdfsynth.py           synthetic PDF generator: byte-layout tampers, minted text PDFs (extraction oracle), compressed deep-forensics corpus
     imagesynth.py         synthetic image generator (real EXIF JPEGs) + 2 provenance tampers
-    wildreceipt.py        WildReceipt loader: KIE annotations -> Receipt (oracle, no OCR)
+    wildreceipt.py        WildReceipt loader: KIE annotations -> Receipt (oracle, no OCR; US English)
+    cord.py               CORD loader (CC-BY-4.0): gt_parse -> Receipt (2nd oracle; Indonesian/IDR, no vendor/date); pure mapping + lazy `datasets` fetch
+    expressexpense.py     ExpressExpense loader (MIT): globs 200 receipt images, no labels -> image-only Receipts (re-extraction FP audit only)
   eval/
     metrics.py            dependency-free precision/recall/F1/AUC/FPR
     harness.py            evaluate() -> ranked Report (detector leaderboard / selector)
-    audit.py              audit_false_positives() -> FP report on legitimate corpus
+    audit.py              audit_false_positives() -> FP report on a legitimate corpus (any of the 3 via --corpus)
     extraction.py         evaluate_extractors() -> field-accuracy leaderboard vs oracle
     calibration.py        summarize_calibration() -> does per-value confidence predict a misread?
-tests/                    151 tests
+tests/                    187 tests
 ```
 
 ---
@@ -265,9 +321,13 @@ tests/                    151 tests
 Fusion and the harness consume any `Detector` uniformly; nothing else changes.
 
 **Adding an extraction approach** has the same shape: subclass `Extractor`
-(`name`, `handles`, `extract(path) -> Receipt`), set `field_confidence` for
-uncertain fields, and register it in `default_extractors()`. `extractor_for(route)`
-and `slipguard score` pick it up with no other changes.
+(`name`, `handles`, `extract(path) -> Receipt`, plus `available()` to report a missing
+dep), set `field_confidence` for uncertain fields, and register it in the route list it
+serves — `default_extractors()` for a dependency-free core extractor, else
+`image_extractors()` / `pdf_extractors()` so the lazy heavy import (torch / pypdfium2)
+stays out of the core path. A reusable label/position reader should feed the shared
+**`kie.py`** rather than re-implement field-picking. `slipguard score` (which falls back to
+the route lists) and `eval-extract` / `eval-pdf-extract` pick it up with no other changes.
 
 ---
 

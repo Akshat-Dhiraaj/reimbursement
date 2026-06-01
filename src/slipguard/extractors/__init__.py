@@ -1,9 +1,11 @@
 """Extractor registry — the canonical set, selected by document route.
 
 Mirrors :func:`slipguard.detectors.default_detectors`: one place that lists the
-available extraction approaches so the CLI and (later) an extraction benchmark can
-pick or rank them. Only the dependency-free StructuredExtractor is registered
-today; the OCR+KIE and VLM extractors plug in here behind the same interface."""
+available extraction approaches so the CLI and the extraction benchmark can pick or
+rank them. The lists are split by route so the dependency-free core
+(:func:`default_extractors`, StructuredExtractor only) never drags in torch/pypdfium2:
+the IMAGE candidates (VLM, docTR-OCR) live in :func:`image_extractors` and the PDF
+candidate (born-digital text) in :func:`pdf_extractors`, all behind the same interface."""
 
 from __future__ import annotations
 
@@ -12,12 +14,14 @@ from typing import Optional
 from ..models import DocumentType
 from .base import Extractor
 from .doctr_ocr import DocTROCRExtractor
+from .pdf_text import PdfTextExtractor
 from .structured import StructuredExtractor
 from .vlm_qwen import QwenVLExtractor
 
 __all__ = [
     "Extractor", "StructuredExtractor", "QwenVLExtractor", "DocTROCRExtractor",
-    "default_extractors", "image_extractors", "image_extractor_for_spec", "extractor_for",
+    "PdfTextExtractor", "default_extractors", "image_extractors", "pdf_extractors",
+    "image_extractor_for_spec", "extractor_for",
 ]
 
 
@@ -25,6 +29,14 @@ def default_extractors() -> list[Extractor]:
     """The dependency-free core set used by ``score`` and the routing path. Heavy
     image extractors are kept out so importing/scoring never drags in torch."""
     return [StructuredExtractor()]
+
+
+def pdf_extractors() -> list[Extractor]:
+    """Candidate PDF-route extractors. One today (born-digital text via pypdfium2);
+    construction is cheap (the pypdfium2 import is lazy) and ``available()`` reports a
+    missing dep, so an un-runnable candidate is skipped with a reason, not a crash. Kept
+    out of :func:`default_extractors` so the dependency-free import never needs pypdfium2."""
+    return [PdfTextExtractor()]
 
 
 def image_extractors(model: Optional[str] = None) -> list[Extractor]:
@@ -56,8 +68,10 @@ def image_extractor_for_spec(spec: str) -> Extractor:
 def extractor_for(
     route: DocumentType, extractors: Optional[list[Extractor]] = None
 ) -> Optional[Extractor]:
-    """First registered extractor that handles ``route``, or ``None`` if the route
-    has no extractor wired yet (PDF / IMAGE until OCR/VLM lands)."""
+    """First extractor in ``extractors`` (default: the dependency-free core set) that
+    handles ``route``, or ``None`` if none does. The default set is STRUCTURED-only, so
+    callers wanting the IMAGE/PDF routes pass :func:`image_extractors` / :func:`pdf_extractors`
+    (or ``score`` falls back to them) to avoid importing torch/pypdfium2 unless needed."""
     for ex in extractors if extractors is not None else default_extractors():
         if ex.can_handle(route):
             return ex

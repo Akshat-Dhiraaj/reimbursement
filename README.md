@@ -44,12 +44,13 @@ never the gate**.
 | Layer | Status | Evidence |
 |---|---|---|
 | Domain models + pluggable detector framework | ✅ Done | `models.py`, `detectors/base.py` |
-| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 140 tests; synthetic leaderboard |
+| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 187 tests; synthetic leaderboard |
 | Noisy-OR fusion + eval harness + CLI | ✅ Done | `slipguard eval` |
-| PDF provenance forensics (`pdf_meta`) | ✅ Done (shallow parse) | `slipguard eval-pdf` |
+| PDF provenance forensics (`pdf_meta`) | ✅ Done (byte scan **+ pikepdf deep layer**) | `slipguard eval-pdf` · `eval-pdf-forensics` |
 | Image-EXIF provenance forensics (`image_meta`) | ✅ Done (EXIF only) | `slipguard eval-image` |
-| Real-data false-positive audit | ✅ Done (WildReceipt) | `slipguard eval-real` |
-| **Extraction route (photo/PDF → fields, OCR/VLM)** | 🔶 **Two extractors benchmarked head-to-head: VLM (Qwen2-VL-2B) leads, docTR OCR+KIE second** | `slipguard eval-extract` → macro **VLM 0.725 / docTR 0.579** |
+| Real-data false-positive audit | ✅ Done (**3 corpora**: WildReceipt, CORD, ExpressExpense) | `slipguard eval-real --corpus …` |
+| **IMAGE-route extraction (photo → fields, OCR/VLM)** | 🔶 **Two extractors benchmarked head-to-head: VLM (Qwen2-VL-2B) leads, docTR OCR+KIE second** | `slipguard eval-extract` → macro **VLM 0.725 / docTR 0.579** |
+| **PDF-route extraction (born-digital → fields)** | ✅ **Done — PDFs now score end-to-end (was provenance-only)** | `slipguard eval-pdf-extract` → macro **0.992** (pypdfium2) |
 | Image *pixel* forensics (AI-generated, tamper-localization) | ❌ Not started | declared in label space only |
 | Real fraud corpora + learned fusion | ❌ Not started | data gap (see DECISIONS) |
 
@@ -62,22 +63,29 @@ nothing about real-world / AI-generated fraud. See §5.
 ```bash
 # Python 3.10+ (dev box 3.13). One runtime dependency: python-stdnum.
 pip install -e ".[dev]"
-# Image-route extractors are optional, heavy, and commercial-safe (Apache-2.0):
-#   pip install -e ".[vlm]"   # Qwen2-VL-2B end-to-end VLM extractor
-#   pip install -e ".[ocr]"   # docTR OCR + transparent keyword/position KIE
+# Extraction backends are optional and commercial-safe:
+#   pip install -e ".[vlm]"   # Qwen2-VL-2B end-to-end VLM extractor (Apache-2.0) — heavy
+#   pip install -e ".[ocr]"   # docTR OCR + transparent keyword/position KIE (Apache-2.0) — heavy
+#   pip install -e ".[pdf]"   # pypdfium2 born-digital PDF text extractor (Apache/BSD) — light, CPU-only
+#   pip install -e ".[pdf-forensics]"  # pikepdf deep PDF provenance/structure layer (MPL-2.0) — light, CPU-only
 
-python -m pytest                  # 151 tests
+python -m pytest                  # 187 tests
 slipguard eval                    # synthetic structured benchmark leaderboard
 slipguard eval-pdf                # synthetic PDF-provenance leaderboard
+slipguard eval-pdf-forensics      # compressed-PDF deep forensics: byte-only vs pikepdf recall (needs [pdf-forensics])
 slipguard eval-image              # synthetic image-EXIF provenance leaderboard (needs Pillow / [vlm])
-slipguard eval-real               # real-receipt false-positive audit (needs the corpus below)
-slipguard eval-extract            # rank IMAGE extractors (docTR vs VLM) on field accuracy vs the oracle
+slipguard eval-real --corpus cord # real-receipt FP audit; --corpus {wildreceipt|cord|expressexpense}
+slipguard eval-extract            # rank IMAGE extractors (docTR vs VLM) on field accuracy vs the oracle (--corpus wildreceipt|cord)
+slipguard eval-pdf-extract        # rank PDF extractor(s) on field accuracy vs a synthetic oracle (needs [pdf])
 slipguard eval-calibration        # does an extractor's per-value confidence predict a misread? (needs [vlm])
 slipguard score data/demo.json    # score one structured receipt JSON
 
-# Real corpus for eval-real (not committed; Apache-2.0):
+# Real corpora for eval-real (none committed; all commercial-safe):
+#  wildreceipt (Apache-2.0):
 curl -L -o datasets/wildreceipt.tar https://download.openmmlab.com/mmocr/data/wildreceipt.tar
 tar -xf datasets/wildreceipt.tar -C datasets
+#  cord (CC-BY-4.0) auto-fetches + caches under datasets/cord on first run (via the [vlm] `datasets` lib)
+#  expressexpense (MIT, images only) — unzip the SRD image set under datasets/expressexpense/
 ```
 
 ## 5. Results so far (read with the caveats)
@@ -85,8 +93,15 @@ tar -xf datasets/wildreceipt.tar -C datasets
 - **Synthetic structured** (240 samples, seed 0): each single detector AUC **0.625**
   (catches only its own subtype) at recall **1.0** / **0** FP; **fused AUC 1.0,
   recall 1.0, 0 FP**. → *validates harness + logic, not real fraud.*
-- **Synthetic PDF provenance** (85 samples): `pdf_meta` AUC **1.0** / recall **1.0**
-  / **0** FP over 45 provenance tampers, routed to **REVIEW**. → *same caveat.*
+- **Synthetic PDF provenance** (85 samples, uncompressed byte layer): `pdf_meta` AUC
+  **1.0** / recall **1.0** / **0** FP over 45 provenance tampers, routed to **REVIEW**.
+  → *same caveat.*
+- **Synthetic PDF deep forensics** (80 *compressed* PDFs whose metadata the byte scanner
+  cannot read): the dependency-free Layer 1 is blind (`pdf_meta` recall **0.000**); the
+  pikepdf Layer 2 recovers the editor tag / date gap from the object streams and adds the
+  structural anomalies (JavaScript, OpenAction, AcroForm, overlay) → `pdf_meta` recall
+  **0.833** / **0** FP, **fused recall 1.0** (all 60 frauds routed to REVIEW). The
+  byte-only→deep jump *is* the value of the `[pdf-forensics]` extra. → *same caveat.*
 - **Synthetic image-EXIF provenance** (70 samples): `image_meta` AUC **1.0** / recall
   **1.0** / **0** FP over 30 tampers (editor tag in EXIF `Software` + capture/modify
   date gap); structured detectors and `pdf_meta` correctly abstain on the IMAGE route.
@@ -100,6 +115,17 @@ tar -xf datasets/wildreceipt.tar -C datasets
   detector logic — is the binding constraint** — which is why the extraction route is the
   active milestone. (Full reasoning in [ROADMAP.md](ROADMAP.md); the re-extraction result
   below sharpens *how*.)
+- **Real receipts, second corpus** (CORD test, 100 *genuine* Indonesian receipts via its
+  `gt_parse` oracle → every flag is a false positive): fused FP **0.170**, again **entirely**
+  the `arithmetic` detector (`tax_id` / `date_sanity` / `pdf_meta` / `image_meta` all abstain —
+  no tax-id, no date label, IMAGE route). But the *cause differs from WildReceipt in an
+  instructive way:* CORD's `gt_parse` is **clean structured truth** (not lossy KIE), so the FP
+  isn't bad extraction — it's that our **3-field `subtotal/tax/total` model is too narrow** to
+  represent receipts whose total legitimately carries a **service charge / discount** or whose
+  menu prices are **tax-inclusive** (`total≠subtotal+tax` ×15, `subtotal≠Σlines` ×2). → *a second,
+  Indonesian-locale corpus reaches the same conclusion by a different route — the binding
+  constraint is representation completeness, not detector logic — and names a concrete fix: a
+  richer Receipt model. (Reproduce: `slipguard eval-real --corpus cord --limit 100`.)*
 - **Extraction accuracy** (Qwen2-VL-2B-Instruct vs the WildReceipt oracle, 100 receipts):
   macro field-accuracy **0.725**, 0 extractor errors — vendor 0.880, date 0.915,
   subtotal 0.740, tax 0.614, total 0.598, line_count 0.602. Money/line-count are the
@@ -145,6 +171,19 @@ tar -xf datasets/wildreceipt.tar -C datasets
   dropped-correct reads (T=0.7 catches 51% of misreads but drops 17% of good ones), and the
   arithmetic-breaking misreads skew confident. → *a measured, genuinely useful calibrated
   per-value feature for cost-aware learned fusion (M3) — not a standalone unsupervised gate.*
+- **PDF-route extraction — born-digital PDFs now score end-to-end (2026-06):** until now a
+  PDF got **provenance forensics only**; nothing read its fields, so `arithmetic` /
+  `date_sanity` / `duplicate` **abstained on every PDF** (a born-digital invoice with edited
+  totals sailed through). `PdfTextExtractor` (pypdfium2, Apache/BSD) reads the embedded **text
+  layer** and feeds the **same KIE the docTR route uses**; `score` on a born-digital PDF now
+  fires `arithmetic` and `date_sanity` alongside `pdf_meta`. `eval-pdf-extract` (40 synthetic
+  born-digital receipts) scores macro **0.992** — date/subtotal/tax/total/line_count **1.000**,
+  vendor **0.950**. The money/date fields are perfect because a born-digital text layer is
+  *exact* (the characters the producer wrote, not a recognition guess) — there is no reading
+  error to make, only KIE *labelling*; the two vendor misses are short store names (`Croma`)
+  losing the positional letter-count tie, a shared-KIE limit, not a read failure. → *honest
+  scope: text-layer only — a **scanned-image** PDF (no text layer) still belongs on the
+  IMAGE/OCR route; rasterise-then-OCR is future work.*
 
 ## 6. Repository layout
 
@@ -154,13 +193,13 @@ src/slipguard/
   routing.py       classify raw input -> PDF | IMAGE | STRUCTURED
   combine.py       noisy_or(): the shared probability-combination rule
   money.py         parse_money(): shared US/EU-aware money parser (oracle + VLM extractor)
-  extractors/      one file per extraction approach (StructuredExtractor, Qwen2-VL) + ABC + registry
+  extractors/      one file per extraction approach (Structured, Qwen2-VL, docTR-OCR, PDF-text) + the shared KIE (kie.py) + ABC + registry
   detectors/       one file per detection method + the Detector ABC + registry
-  forensics/       provenance inspectors: PDF (dependency-free bytes) + image EXIF (Pillow)
-  data/            synthetic generators + real-corpus loaders (WildReceipt)
+  forensics/       provenance inspectors: PDF (dependency-free bytes + optional pikepdf deep layer) + image EXIF (Pillow)
+  data/            synthetic generators (images + born-digital PDFs + compressed deep-forensics PDFs) + real-corpus loaders (WildReceipt, CORD, ExpressExpense)
   eval/            metrics, ranking harness, false-positive audit, extraction-accuracy + confidence-calibration benchmarks
-  cli.py           `slipguard eval | eval-pdf | eval-image | eval-real | eval-extract | eval-calibration | score`
-tests/             151 tests
+  cli.py           `slipguard eval | eval-pdf | eval-pdf-forensics | eval-image | eval-real --corpus … | eval-extract | eval-pdf-extract | eval-calibration | score`
+tests/             187 tests
 ```
 
 ## 7. Licence posture (summary)
@@ -168,6 +207,7 @@ tests/             151 tests
 This is a real product, so the shipping path uses **commercial-safe** components
 only. We deliberately **avoid** LayoutLMv3 (CC-BY-NC), DocTamper (NC), FUNSD (NC),
 Surya (GPL), INV-CDIP (CC-BY-NC), and the *Find-it-again!* forgery set (licence
-unclear / research-only). We **prefer** WildReceipt (Apache-2.0), CORD (CC-BY-4.0),
-docTR / PaddleOCR (Apache-2.0), and `python-stdnum` (LGPL, fine as a dependency).
-Rationale and the full table are in [DECISIONS.md](DECISIONS.md).
+unclear / research-only). The three real-receipt corpora now wired for the FP audit are all
+commercial-safe: **WildReceipt** (Apache-2.0), **CORD** (CC-BY-4.0), and **ExpressExpense**
+(MIT, images only) — alongside **docTR / PaddleOCR** (Apache-2.0) and `python-stdnum` (LGPL,
+fine as a dependency). Rationale and the full table are in [DECISIONS.md](DECISIONS.md).

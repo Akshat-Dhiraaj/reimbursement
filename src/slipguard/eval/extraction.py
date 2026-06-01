@@ -113,10 +113,11 @@ def evaluate_extractor(extractor: Extractor, truths: Sequence[Receipt]) -> Extra
     n_errors = 0
 
     for truth in truths:
+        # IMAGE-route oracles carry image_path; PDF-route oracles carry source_path —
+        # resolve either so the same harness scores both routes.
+        doc_path = truth.image_path or truth.source_path or ""
         try:
-            pred: Optional[Receipt] = extractor.extract(
-                truth.image_path or "", doc_id=truth.doc_id
-            )
+            pred: Optional[Receipt] = extractor.extract(doc_path, doc_id=truth.doc_id)
         except Exception:  # an extractor that can't read this doc is a miss, not a crash
             pred, n_errors = None, n_errors + 1
 

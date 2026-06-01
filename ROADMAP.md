@@ -10,8 +10,8 @@ Status as of 2026-06-01. Rationale for the choices below lives in
 | Milestone | Scope | Status |
 |---|---|---|
 | **M1** | Deterministic layer + synthetic benchmark + harness + fusion + CLI | ✅ **Done** |
-| **M2** | Provenance route: PDF + image-EXIF forensics + first real-data FP audit | ✅ **Done** (shallow PDF parse; pikepdf/exiftool deferred) |
-| **M2.5** | **Faithful extraction route (OCR/VLM): photo/PDF → fields** | 🔶 **In progress** — two extractors benchmarked head-to-head: VLM (Qwen2-VL-2B, macro 0.725) leads, docTR OCR+KIE second (0.579); scalar-misread confidence + PDF-route extractor next |
+| **M2** | Provenance route: PDF + image-EXIF forensics + real-data FP audit (**3 corpora**) | ✅ **Done** (byte parse **+ pikepdf deep layer** for compressed PDFs; exiftool deferred) |
+| **M2.5** | **Faithful extraction route (OCR/VLM/PDF): photo/PDF → fields** | 🔶 **In progress** — IMAGE: VLM (Qwen2-VL-2B, macro 0.725) leads docTR OCR+KIE (0.579) head-to-head; **PDF: born-digital text route landed (macro 0.992)** so PDFs now score end-to-end; scalar-misread confidence calibrated (AUC 0.758) for the M3 fuser |
 | **M3** | Image forensics route + real fraud corpora + learned fusion | ❌ Planned |
 
 ---
@@ -26,11 +26,19 @@ Status as of 2026-06-01. Rationale for the choices below lives in
   recall 1.0 / 0 FP; **fused AUC 1.0 / recall 1.0 / 0 FP**.
 
 **M2 — PDF provenance + real-data audit.**
-- `pdf_meta` detector + dependency-free `forensics/pdf.py` inspector: flags
-  incremental updates (extra `%%EOF`), editor tags (`/Producer`·`/Creator`), and
-  ModDate ≫ CreationDate. Synthetic PDF benchmark + `eval-pdf`.
-- Evidence: PDF benchmark (85 samples) — `pdf_meta` AUC 1.0 / recall 1.0 / 0 FP over
-  45 provenance tampers → routed to REVIEW; structured detectors correctly abstain.
+- `pdf_meta` detector + **two-layer** `forensics/pdf.py` inspector. **Layer 1**
+  (dependency-free bytes): incremental updates (extra `%%EOF`), editor tags
+  (`/Producer`·`/Creator`), ModDate ≫ CreationDate. Synthetic PDF benchmark + `eval-pdf`.
+- **Layer 2** (pikepdf, optional `[pdf-forensics]`, MPL-2.0 — *not* AGPL PyMuPDF):
+  decodes object-stream + XMP metadata so it **recovers the editor tag / date gap Layer 1
+  misses on modern compressed PDFs**, and adds structural anomalies (AcroForm, JavaScript,
+  OpenAction, overlay annotations). New `generate_pdf_deep` compressed corpus + the
+  `eval-pdf-forensics` byte-vs-deep contrast; `pdf_meta` gains a `use_deep` knob; falls
+  back to Layer 1 (never crashes) when the extra is absent.
+- Evidence: PDF benchmark (85 samples, uncompressed) — `pdf_meta` AUC 1.0 / recall 1.0 /
+  0 FP over 45 tampers → REVIEW; structured detectors correctly abstain. Deep corpus (80
+  *compressed* PDFs) — Layer 1 recall **0.000** (blind by construction) → Layer 2 recall
+  **0.833** / 0 FP, **fused recall 1.0**: the recall the extra recovers.
 - **Real-data false-positive audit** (`eval-real` + `eval/audit.py` +
   `data/wildreceipt.py`): WildReceipt test split, 472 *genuine* receipts. Fused FP
   **0.364**, entirely the `arithmetic` detector, entirely caused by **lossy oracle
@@ -41,6 +49,24 @@ Status as of 2026-06-01. Rationale for the choices below lives in
 - Real data also caught two robustness bugs synthetic data never could (now fixed +
   tested): `duplicate._key` crashing on a `None` date; the CLI crashing on non-cp1252
   vendor text on Windows.
+- **Two more real corpora, behind a `--corpus {wildreceipt,cord,expressexpense}` selector**
+  (`data/cord.py`, `data/expressexpense.py`; `eval-real` / `eval-extract` / `eval-calibration`
+  all speak it). **CORD** (CC-BY-4.0, naver-clova-ix/cord-v2) is a *second oracle* corpus —
+  Indonesian receipts whose human `gt_parse` reconstructs a `Receipt` like WildReceipt's KIE
+  (no vendor/date in the labels → those detectors abstain; IDR/ID → GSTIN abstains; pure
+  mapping, unit-tested, lazy `datasets` fetch). **ExpressExpense** (MIT, 200 images, *no labels*)
+  feeds the FP audit only via real-extractor re-extraction (rejected by the oracle-scored
+  `eval-extract`/`eval-calibration`). **Measured CORD oracle FP 0.170 (17/100), entirely
+  `arithmetic`** (`total≠subtotal+tax` ×15, `subtotal≠Σlines` ×2; all other detectors abstain).
+  The honest, instructive finding: WildReceipt's FP was *lossy extraction*, but CORD's gt_parse
+  is **clean structured truth**, so its FP isolates a **different** root cause — the **3-field
+  `subtotal/tax/total` model is too narrow** for service-charge / discount / tax-inclusive totals
+  (cord-test:48 confirms a tax-inclusive menu line). → a second, Indonesian-locale corpus
+  corroborates "the binding constraint is representation completeness, not detector logic" by a
+  new mechanism, and names a concrete fix: a richer Receipt model (→ feeds #62). A 1000× money
+  bug CORD exposed (`Rp.118.000` → `118.0`) was fixed in `money.parse_money` (negative-lookbehind
+  so a currency-prefix dot isn't read as a decimal point) — same class as the earlier EU-decimal
+  100× bug. (Reproduce: `slipguard eval-real --corpus cord --limit 100`.)
 
 **M2 (continued) — image-EXIF provenance.**
 - `image_meta` detector + `forensics/image.py` inspector (Pillow): flags an image
@@ -54,7 +80,8 @@ Status as of 2026-06-01. Rationale for the choices below lives in
 - Evidence: image benchmark (70 samples) — `image_meta` AUC 1.0 / recall 1.0 / 0 FP
   over 30 EXIF-provenance tampers (editor tag + capture/modify gap); the structured
   detectors and `pdf_meta` correctly abstain on the IMAGE route.
-- **151 tests pass** (full suite, all milestones).
+- **187 tests pass** (full suite, all milestones; +12 real-corpora: CORD oracle mapping +
+  ExpressExpense glob + the `Rp.`-prefix money regression).
 
 ---
 
@@ -109,8 +136,10 @@ piece.
    confident — so its proper home is a **cost-aware learned fuser** (M3) weighing this per-value
    feature against the cost of a needless abstain, not a hand-set floor. Behaviour-preserving on
    clean extractions and on synthetic/oracle fields (empty `field_confidence` == trusted).
-4. ✅ **Done for STRUCTURED** — `cli.score` runs route → `extractor_for(route)` →
-   detectors; PDF/IMAGE return an explicit "no extractor registered" until step 2 lands.
+4. ✅ **Done for all three routes** — `cli.score` runs route → extractor → detectors:
+   `extractor_for(route)` for the dependency-free STRUCTURED core, falling back to the
+   route candidate lists (`image_extractors()` / `pdf_extractors()`) so a photo or a
+   born-digital PDF scores end-to-end without dragging torch/pypdfium2 into the core path.
 5. ✅ **Accuracy benchmark + leaderboard landed** — `eval/extraction.py` scores any
    `Extractor` field-by-field (vendor / date / subtotal / tax / total / line-count)
    against the WildReceipt KIE *oracle* as ground truth (per-field table + macro-avg
@@ -135,14 +164,35 @@ piece.
    actually predict a misread? On 222 scored money reads (same 100 receipts) it does — **AUC
    0.758**, monotonic reliability (accuracy 0.37 below 0.6 → 0.87 in [0.9, 1.0)) — so the signal
    is a genuine, *measured* feature for the M3 learned fuser, not just a hoped-for one (item 3).
+8. ✅ **PDF-route extractor landed — born-digital PDFs now score end-to-end.** Closed the gap
+   where the PDF route had provenance forensics (`pdf_meta`) but **no field read**, so
+   arithmetic / tax_id / date_sanity / duplicate never fired on a PDF. `extractors/pdf_text.py`
+   (`PdfTextExtractor`, **pypdfium2**, Apache-2.0/BSD — deliberately not AGPL PyMuPDF) reads a
+   PDF's **embedded text layer** as per-line rects and feeds the **same shared KIE** the OCR
+   route uses (`receipt_from_lines`, factored out into `extractors/kie.py`); exact text → `conf
+   1.0`, so the arithmetic guard stays off. Measured on a **minted round-trip oracle**
+   (`data/pdfsynth.generate_pdf_extraction` renders known Receipts to real text PDFs;
+   `slipguard eval-pdf-extract`, n=40): **macro 0.992** — date / subtotal / tax / total /
+   line_count all **1.000**, 0 errors. The lone gap is **vendor 0.950** (38/40), and the honest
+   cause is a **KIE labelling** limit, not a read failure: on a short receipt an item line lands
+   in the top band and out-letters a short store name (`'Croma'` loses to `'Coffee 47.53'` /
+   `'Stapler 6.68'`) — a shared-KIE vendor-rule ceiling that improving lifts *both* routes. **+11
+   tests** (`tests/test_pdf_text.py`: rect→Line geometry, the registry/contract, and two
+   pypdfium2 round-trips). **Honest limit:** text-layer only — a **scanned-image PDF** (no text
+   layer) reads empty and belongs on the IMAGE/OCR route; rasterise-then-OCR is future work.
 
 ### M2 (continued) — deeper provenance forensics
 **Done:** image EXIF / editor-tag forensics on the IMAGE route (Pillow, `image_meta`).
-**Plan:** add `pikepdf` / `pdfid` to decode xref-stream, compressed, and XMP PDF
-metadata (and detect text-laid-over-scan); optionally `exiftool` for richer image
-metadata (maker-notes, thumbnail-vs-image mismatch) beyond the core EXIF tags Pillow
-exposes. High-yield, hard to fake, commercial-safe. Plugs in behind the existing
-`Detector` contract.
+**Done:** `pikepdf` deep PDF layer (`inspect_pdf_deep`, optional `[pdf-forensics]`,
+MPL-2.0) — decodes xref-stream / compressed / XMP metadata so it recovers the editor tag /
+date gap Layer 1 misses on modern compressed PDFs, plus structural anomalies (AcroForm,
+JavaScript, OpenAction, overlay annotations). Measured byte-vs-deep contrast on a minted
+compressed corpus (`eval-pdf-forensics`): `pdf_meta` recall **0.000 → 0.833**, fused **1.0**.
+**Deferred — text-over-scan flag:** a text-layer-atop-scan signal collides with legitimate
+OCR'd/searchable scans (high FP), so it belongs in the M3 pixel/layout route as a *weak*
+signal, not a structural flag (see DECISIONS.md). **Deferred — `exiftool`:** richer image
+metadata (maker-notes, thumbnail-vs-image mismatch) beyond Pillow's core EXIF tags; not yet
+needed. Both plug in behind the existing `Detector` contract.
 
 ### M3 — image forensics route (calibrated *weak* signals)
 **Plan:** an AI-generated-image detector (CLIP/ViT family, diversity-trained) and a
@@ -151,32 +201,55 @@ tamper-localizer, added as `applies_to=(IMAGE,)` detectors. Per
 honestly under screenshot/JPEG laundering and fused as low-weight inputs.
 
 ### M3 — real fraud corpora + learned fusion
-**Plan:** (a) pursue written permission for *Find it again!* and onboard
-IQline HR-provided receipts (proprietary, never committed) as real in-domain data;
-(b) once the harness has measured per-detector performance on real data, replace
-noisy-OR with a **calibrated/learned fuser** fit on those numbers.
+**Done (legitimate FP-audit corpora):** three real *legitimate* corpora are now wired for the
+false-positive audit — WildReceipt, CORD, ExpressExpense (see the M2 entry). These measure FP
+cost, not fraud recall (every receipt is genuine). What remains here is real *fraud* data + the
+fuser:
+**Plan:** (a) pursue written permission for *Find it again!* (the only public real-forgery set)
+and onboard IQline HR-provided receipts (proprietary, never committed) as real in-domain fraud
+data; (b) once the harness has measured per-detector performance on real data, replace noisy-OR
+with a **calibrated/learned fuser** (#62) fit on those numbers — its first measured inputs already
+exist: the VLM's per-value confidence (AUC 0.758), the PDF *structural* signal, and the two
+real-corpora FP findings (WildReceipt extraction-lossiness + CORD model-narrowness) that both point
+at **representation completeness**, including a concrete richer-Receipt-model target (service-charge
+/ discount / tax-inclusive fields) that CORD surfaced.
 
 ---
 
 ## Known limitations (call them out, don't hide them)
-- **Scalar confidence is a calibrated *feature*, not a standalone gate; PDF route still empty:**
-  the IMAGE route now has *two* benchmarked extractors (VLM 0.725 + docTR 0.579, ranked by
-  `eval-extract`) and STRUCTURED has the trivial one, but the **PDF route still raises "no
-  extractor registered"**. The VLM emits **both** line-item parse-completeness *and*
-  per-token-logprob scalar confidence; the latter does **not** reduce FP at the 0.5 floor (it
-  catches only 18% of misreads), but the **calibration study** (`eval-calibration`) measured it
-  is **far from uninformative — AUC 0.758, monotonic reliability** — so the 0.5 floor was too
-  low, not the signal useless. There is no free-lunch threshold (every cut trades misread-recall
-  for dropped-correct reads), so it earns its keep as a **calibrated per-value feature for the
-  cost-aware learned fuser (M3)**, not a hand-set abstain floor. **docTR's KIE is still heuristic:**
-  row-merge fixed the money fields, but vendor (0.380) and line_count (0.312) lag the VLM, and
-  non-English summary keywords (e.g. German *Netto/MwSt/Summe*) aren't in the vocab.
+- **All three routes now extract, but each has an honest ceiling.** STRUCTURED has the trivial
+  reader; IMAGE has *two* benchmarked extractors (VLM 0.725 + docTR 0.579, ranked by
+  `eval-extract`); and the **PDF route now reads** born-digital text (macro 0.992,
+  `eval-pdf-extract`). Remaining ceilings: (a) **PDF text-layer only** — a **scanned-image PDF**
+  (no text layer) reads empty and belongs on the IMAGE/OCR route (rasterise-then-OCR is future
+  work); (b) the **shared-KIE vendor rule** loses a top-band letter-count tie on short receipts
+  (the PDF route's only sub-1.0 field, vendor 0.950 — same heuristic the OCR route uses);
+  (c) **docTR's KIE is still heuristic** — row-merge fixed the money fields, but vendor (0.380)
+  and line_count (0.312) lag the VLM, and non-English summary keywords (German *Netto/MwSt/Summe*)
+  aren't in the vocab.
+- **Scalar confidence is a calibrated *feature*, not a standalone gate:** the VLM emits **both**
+  line-item parse-completeness *and* per-token-logprob scalar confidence; the latter does **not**
+  reduce FP at the 0.5 floor (it catches only 18% of misreads), but the **calibration study**
+  (`eval-calibration`) measured it is **far from uninformative — AUC 0.758, monotonic
+  reliability** — so the 0.5 floor was too low, not the signal useless. There is no free-lunch
+  threshold (every cut trades misread-recall for dropped-correct reads), so it earns its keep as
+  a **calibrated per-value feature for the cost-aware learned fuser (M3)**, not a hand-set floor.
+- **The `Receipt` model is 3-field (subtotal / tax / total) — a measured FP source, not a bug.**
+  CORD's clean-oracle FP audit (0.170, all `arithmetic`) isolated this: a genuine receipt whose
+  total carries a **service charge / discount**, or whose menu prices are **tax-inclusive**, fails
+  `total = subtotal + tax` because the model has no slot for those terms. This is an honest data-model
+  limitation we deliberately **do not** suppress; the fix is a richer Receipt (extra money fields) —
+  scoped as a concrete target for the M3 model/fuser work (#62), since it also gives the fuser a
+  cleaner arithmetic signal.
 - **Synthetic ≠ real:** the ~1.0 synthetic AUCs validate logic, not real fraud.
 - **Image provenance is EXIF-only:** `image_meta` reads metadata, not pixels — a
   re-encoded/stripped image yields no signal (abstain), and EXIF is forgeable. Pixel-
   level AI-generated / tamper-localization forensics are M3 (calibrated *weak* signals).
-- **Shallow PDF parse:** `forensics/pdf.py` can't read xref-stream/compressed/XMP
-  yet; on those PDFs the string fields read `None` (the `%%EOF` signal still holds).
+- **PDF parse depth is gated on an extra:** the dependency-free Layer 1 can't read
+  xref-stream/compressed/XMP metadata (string fields read `None`; the `%%EOF` signal still
+  holds). The `[pdf-forensics]` extra (pikepdf, Layer 2) recovers those and adds structural
+  flags — but **without it installed, compressed PDFs still read blind** (recall 0 on
+  compressed-metadata frauds). Installing the extra is the fix; it is optional by design.
 - **Date-era artifact:** on the 2010–2019 WildReceipt corpus, `date_sanity`'s
   "very old" check fires as a dataset artifact; use `eval-real --today` to control it.
 - **Duplicate audit mode:** the FP audit primes `duplicate` with empty history (each

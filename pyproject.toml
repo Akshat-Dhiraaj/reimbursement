@@ -30,6 +30,22 @@ ocr = [
     "torch>=2.1",
     "torchvision",
 ]
+# Born-digital PDF text extraction (the PDF route's field reader). pypdfium2 is
+# Apache-2.0 / BSD-3-Clause and bundles Google's PDFium (BSD-3-Clause) — no copyleft,
+# no AGPL (we deliberately avoid PyMuPDF). Light and CPU-only, but kept optional so the
+# core install stays dependency-free; the extractor reports it missing via available().
+pdf = [
+    "pypdfium2>=4",
+]
+# Deep PDF *forensics* (the provenance route's Layer 2): pikepdf decodes object/xref
+# streams and XMP, so it recovers the editor tag / date gap that the byte scanner misses
+# on modern compressed PDFs and surfaces structural anomalies (AcroForm, JavaScript,
+# OpenAction, overlay annotations). MPL-2.0, a qpdf binding (~3 MB) — commercial-safe and
+# deliberately NOT AGPL PyMuPDF. Separate from [pdf] (extraction): forensics and field
+# reading are independent concerns. Optional; pdfmeta falls back to Layer 1 when absent.
+pdf-forensics = [
+    "pikepdf>=8",
+]
 
 [project.scripts]
 slipguard = "slipguard.cli:main"
