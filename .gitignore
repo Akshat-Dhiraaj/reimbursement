@@ -16,9 +16,12 @@ env/
 .coverage
 htmlcov/
 
-# Data / model artifacts (kept out of git; generated locally)
-data/
-artifacts/
+# Data / model artifacts (kept out of git; generated locally).
+# Anchored to the repo root so the source package src/slipguard/data/ stays tracked;
+# the demo fixture used by the quickstart is kept so a fresh clone can run `score`.
+/data/*
+!/data/demo.json
+/artifacts/
 *.ckpt
 *.pt
 *.onnx
