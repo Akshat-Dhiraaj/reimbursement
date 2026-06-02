@@ -40,6 +40,42 @@ def test_arithmetic_abstains_without_fields():
     assert ArithmeticConsistencyDetector().score(r).abstained
 
 
+def test_arithmetic_service_charge_reconciles():
+    # total = subtotal + tax + service charge: modelling the service charge keeps it clean,
+    # and without the field the SAME total would read as fraud — proves the field is the fix.
+    r = clean()
+    r.service_charge = 20.0
+    r.total = round(r.subtotal + r.tax_amount + 20.0, 2)
+    assert ArithmeticConsistencyDetector().score(r).score < 0.1
+    r.service_charge = None
+    assert ArithmeticConsistencyDetector().score(r).score > 0.6
+
+
+def test_arithmetic_discount_reconciles():
+    r = clean()
+    r.discount = 15.0
+    r.total = round(r.subtotal + r.tax_amount - 15.0, 2)
+    assert ArithmeticConsistencyDetector().score(r).score < 0.1
+
+
+def test_arithmetic_tax_inclusive_lines_reconcile():
+    # tax-inclusive menu: line prices already include tax, so sum(lines) == subtotal + tax
+    # (not the pre-tax subtotal). The detector accepts that instead of flagging subtotal!=lines.
+    items = [LineItem("A", 1, 118.0, 118.0)]   # one line, tax-inclusive (== subtotal + tax)
+    r = Receipt("ti", "V", date(2026, 1, 10), line_items=items,
+                subtotal=100.0, tax_amount=18.0, total=118.0)
+    assert ArithmeticConsistencyDetector().score(r).score < 0.1
+
+
+def test_arithmetic_still_flags_real_mismatch_despite_service():
+    # the richer model fixes FPs, it does NOT blanket-suppress a genuine contradiction:
+    # a total still wrong after the service charge is accounted for is still caught.
+    r = clean()
+    r.service_charge = 20.0
+    r.total = round(r.subtotal + r.tax_amount + 20.0 + 75.0, 2)  # 75 too high
+    assert ArithmeticConsistencyDetector().score(r).score > 0.6
+
+
 def test_taxid_valid_is_low():
     s = TaxIdValidationDetector().score(clean())
     assert not s.abstained and s.score < 0.1

@@ -67,6 +67,22 @@ def test_receipt_from_gt_maps_money_and_locale():
     assert r.source is DocumentType.IMAGE and r.image_path == "img.png"
 
 
+def test_receipt_from_gt_maps_service_charge_and_discount():
+    # CORD's sub_total carries service_price / discount_price (×12 / ×6 in CORD-test); the
+    # richer Receipt maps them so `total` reconciles as subtotal + tax + service - discount
+    # (this is what cut the CORD clean-oracle FP 0.170 -> 0.030).
+    gt = {
+        "menu": [{"nm": "X", "price": "100000"}],
+        "sub_total": {"subtotal_price": "100000", "tax_price": "10000",
+                      "service_price": "5000", "discount_price": "3000"},
+        "total": {"total_price": "112000"},  # 100000 + 10000 + 5000 - 3000
+    }
+    r = _receipt_from_gt(gt, "cord-test:svc")
+    assert r.service_charge == 5000.0 and r.discount == 3000.0
+    from slipguard.detectors.arithmetic import ArithmeticConsistencyDetector
+    assert ArithmeticConsistencyDetector().score(r).score < 0.1   # reconciles -> no FP
+
+
 def test_receipt_from_gt_tolerates_empty_or_malformed_blocks():
     # sub_total/total absent or not dicts must not crash; money fields just read None.
     r = _receipt_from_gt({"menu": []}, "cord-test:1")

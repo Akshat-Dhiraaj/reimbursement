@@ -80,7 +80,8 @@ Status as of 2026-06-02. Rationale for the choices below lives in
 - Evidence: image benchmark (70 samples) — `image_meta` AUC 1.0 / recall 1.0 / 0 FP
   over 30 EXIF-provenance tampers (editor tag + capture/modify gap); the structured
   detectors and `pdf_meta` correctly abstain on the IMAGE route.
-- **224 tests pass** (full suite, all milestones; +11 for learned fusion (#62) and +26 for
+- **229 tests pass** (full suite, all milestones; +11 for learned fusion (#62), +5 for the
+  richer `Receipt` model (#81: service-charge/discount/tax-inclusive arithmetic), and +26 for
   lightweight forensics (#71/#72/#76) — the logistic fit / pluggable combiner / down-weights-a-noisy-
   detector + `compare_fusion` smoke, plus the PDF `/Prev` content-edit & signature-coverage
   localization and the C2PA classify / detector-branch / real-`Reader` tests).
@@ -154,7 +155,7 @@ Status as of 2026-06-02. Rationale for the choices below lives in
 - **#79 Groq hosted-VLM extractor (the API paradigm):** `extractors/groq_vlm.py`, stdlib `urllib`
   (no new dep), reuses the Qwen prompt + parser, `GROQ_API_KEY` from env, model
   `meta-llama/llama-4-scout-17b-16e-instruct`. **Measured (`eval-extract --extractor groq`): macro
-  0.947 (N=12, 0 errors)** vs local Qwen2-VL-2B 0.725 (N=100) / docTR 0.579. Findings: Groq's
+  0.847 (N=50, 0 errors; a first N=12 run read an optimistic 0.947)** vs local Qwen2-VL-2B 0.725 (N=100) / docTR 0.579. Findings: Groq's
   Cloudflare 1010-blocks default urllib UAs (→ browser UA, datacenter only); free tier rate-limits
   batches (→ 429 retry-with-backoff). Small-N caveat loud; egress is a policy gate.
 - **#80 [SCORECARD.md](SCORECARD.md):** the per-task **pure-Python vs local-model vs API** matrix —
@@ -345,13 +346,16 @@ cleaner signal that even a reweighting fuser can't recover.
   fixture — c2pa-rs's cert profile makes minting impractical); `c2pa-python` is a ~260 MB optional
   install. The durable backstop against a *careful* edit that keeps the math consistent and isn't a
   duplicate remains **arithmetic + duplicate intelligence** — provenance is defeated by stripping.
-- **The `Receipt` model is 3-field (subtotal / tax / total) — a measured FP source, not a bug.**
-  CORD's clean-oracle FP audit (0.170, all `arithmetic`) isolated this: a genuine receipt whose
-  total carries a **service charge / discount**, or whose menu prices are **tax-inclusive**, fails
-  `total = subtotal + tax` because the model has no slot for those terms. This is an honest data-model
-  limitation we deliberately **do not** suppress; the fix is a richer Receipt (extra money fields) —
-  scoped as a concrete target for the M3 model/fuser work (#62), since it also gives the fuser a
-  cleaner arithmetic signal.
+- **The `Receipt` model now carries service-charge / discount + accepts tax-inclusive lines
+  (#81 — this was the top measured FP source, now fixed).** CORD's clean-oracle FP audit (0.170,
+  all `arithmetic`) isolated it: a genuine receipt whose total carries a **service charge /
+  discount**, or whose menu prices are **tax-inclusive**, used to fail `total = subtotal + tax`
+  because the 3-field model had no slot. Fixed by adding `service_charge` / `discount` (total
+  reconciles as `subtotal + tax + service − discount`) and accepting tax-inclusive line prices
+  (`Σlines ≈ subtotal + tax`). **Measured: CORD FP 0.170 → 0.030 (~5.7×), WildReceipt 0.364 →
+  0.324** (no regression). Honest residual: 3 CORD receipts still flag (unlabeled `etc` / big
+  mismatches / line-level discounts) — deliberately **not** chased to 0 (would risk suppressing
+  real signal).
 - **Synthetic ≠ real:** the ~1.0 synthetic AUCs validate logic, not real fraud.
 - **Image provenance is metadata-only (EXIF + C2PA), not pixels:** `image_meta` reads EXIF
   *and* C2PA Content Credentials — a re-encoded/stripped image yields no signal (abstain), EXIF is

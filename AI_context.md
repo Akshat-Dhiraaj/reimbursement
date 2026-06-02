@@ -460,18 +460,34 @@ signal is a pluggable sub-signal behind the existing `pdf_meta` / `image_meta` d
 - **#79 Groq hosted-VLM extractor = the API paradigm:** `extractors/groq_vlm.py` reuses the Qwen
   prompt + JSON→Receipt parser (DRY), **stdlib `urllib` (no new dep)**, reads `GROQ_API_KEY` from
   env (never stored), model `meta-llama/llama-4-scout-17b-16e-instruct`. **Measured (`eval-extract
-  --extractor groq`): macro 0.947 (N=12, 0 errors)** vs local Qwen2-VL-2B **0.725** (N=100) /
+  --extractor groq`): macro 0.847 (N=50, 0 errors)** vs local Qwen2-VL-2B **0.725** (N=100) /
   docTR 0.579 — a big hosted model reads markedly better. Two real findings: Groq's Cloudflare
   **1010-blocks default urllib/datacenter UAs** (→ browser UA, datacenter/CI only); the **free
   tier rate-limits** rapid batches (8/15 → 429) so we added **429 retry-with-backoff** (0/12
-  after). N=12 is small vs 100, so 0.947 is a small-sample estimate — direction is robust.
+  after). A first N=12 run read an optimistic 0.947; the firmer N=50 is 0.847 (still < Qwen's
+  N=100, so sample-sensitive) — the direction (hosted-big >> local-small) is robust.
 - **#80 `SCORECARD.md`:** the per-task **pure-Python vs local-model vs API** matrix — the binding
   **gap is photo→field extraction** (pure-Python can't read pixels; local-small 0.725 is
-  private+heavy-GPU; API-big 0.947 is accurate but egress+rate-limits); detection / fusion /
+  private+heavy-GPU; API-big 0.847 is accurate but egress+rate-limits); detection / fusion /
   PDF+structured extraction are well-served by pure-Python + light CPU libs. Recommends a
   **cascade**, with photo extraction the one local-vs-API fork (decided by data-egress policy).
 - New deps this batch: **none** (`urllib` is stdlib). **224 tests pass** (+9: 3 content-overlay,
-  1 multiroute-fuser, 5 Groq-offline). #74/#75/#60 stay deferred (real-data / heavy-pixel bucket).
+  1 multiroute-fuser, 5 Groq-offline). #74/#75 were later **measured-rejected on real data**
+  (6/8 real receipts already libjpeg-standard ⇒ #74 would FP on most; 0/12 carry an EXIF
+  thumbnail ⇒ #75 ~never fires); #60 stays deferred (GPU + hype).
+
+**Richer Receipt model — the biggest measured real-FP lever, done (2026-06-02 — #81).** Added
+`service_charge` + `discount` to `Receipt`; `arithmetic` now reconciles **total == subtotal +
+tax + service − discount** (both default 0 → plain 3-field receipts unchanged) and accepts
+**tax-inclusive** line prices (Σlines ≈ subtotal OR subtotal+tax). The CORD loader maps gt_parse
+`service_price` / `discount_price` (probed real CORD-test: ×12 / ×6). **Measured (`eval-real`):
+CORD clean-oracle FP 0.170 → 0.030 (~5.7×); WildReceipt FP 0.364 → 0.324** (slight improvement,
+no regression — the tax-inclusive relaxation also helped a few lossy WildReceipt cases). Closes
+exactly the FP source CORD's clean-oracle audit isolated (3-field model too narrow:
+total-with-service/discount ×15 + tax-inclusive-lines ×2). 3 CORD residuals remain (unlabeled
+`etc` / big mismatches / line-level discounts — honestly **not** chased to 0; chasing risks
+suppressing real signal). Monotonic-on-FP (the changes only RELAX), so synthetic tests are
+unchanged. **229 tests pass.** (`.env` created for `GROQ_API_KEY`, gitignored + verified.)
 
 ## 4. Quickstart
 
@@ -485,7 +501,7 @@ pip install -e ".[dev]"          # editable install + pytest
 #   pip install -e ".[pdf-forensics]"  # pikepdf deep PDF provenance/structure layer (MPL-2.0) — light, CPU-only
 #   pip install -e ".[c2pa]"     # C2PA / Content Credentials reader for image_meta (MIT/Apache) — CPU-only but ~260 MB
 
-python -m pytest                 # run tests (224)
+python -m pytest                 # run tests (229)
 slipguard eval                   # structured benchmark leaderboard
 slipguard eval-pdf               # PDF-provenance benchmark leaderboard
 slipguard eval-pdf-forensics     # compressed-PDF deep forensics: byte-only vs pikepdf recall (needs [pdf-forensics])
@@ -581,7 +597,7 @@ src/slipguard/
     extraction.py         evaluate_extractors() -> field-accuracy leaderboard vs an oracle, IMAGE (WildReceipt) + PDF (synthetic) routes (eval-extract / eval-pdf-extract)
     calibration.py        summarize_calibration() -> does per-value confidence predict a misread? AUC + reliability bins + abstain sweep (eval-calibration)
     fusion_bench.py       compare_fusion() -> learned logistic fuser vs noisy-OR: leakage-free split, synth-vs-real-legit AUC + real FP at matched recall + legible weights (eval-fusion)
-tests/                    224 tests: detectors, synth invariants, harness, pdf + image forensics (incl. /Prev content-edit, signature coverage, content-stream overlay), C2PA classify, loader, FP audit (+ image_bearing apples-to-apples), extraction + extraction-eval, money parser (incl. the `Rp.`-prefix 1000× regression CORD exposed), VLM parse-completeness + token-logprob scalar confidence (incremental token→char spans, min-over-digits, guard-arming) + docTR OCR-confidence guards, shared KIE/date/money units + row-merge (split two-column recovery), confidence calibration (roc_auc separation, reliability bins, threshold sweep, oracle-pairing), pdf_text (pypdfium2 rect→Line geometry, PDF-route binding, synthetic renderer, real born-digital round-trip), deep PDF forensics (compressed blind-spot recovery, JS/OpenAction/AcroForm/overlay structural flags, the use_deep knob, byte-vs-deep harness contrast — skip-gated on [pdf-forensics]), CORD oracle mapping (qty/line-amount/discount-netting/sub-flatten/locale, pure on hand-built dicts), ExpressExpense glob (recursive, sorted, images-only, limit, fetch-hint on missing dir), learned fusion (feature-vector ordering by detector name + abstain→0, logistic separates separable data, deterministic fit, the noisy-detector-down-weight mechanism, pluggable-combiner override + clamp + noisy-OR-unchanged guard, .explain magnitude-sort) + fusion-bench smoke (synthetic-only run, real columns→n/a, provenance detectors flagged inactive)
+tests/                    229 tests: detectors (incl. arithmetic service-charge/discount/tax-inclusive reconciliation), synth invariants, harness, pdf + image forensics (incl. /Prev content-edit, signature coverage, content-stream overlay), C2PA classify, loader, FP audit (+ image_bearing apples-to-apples), extraction + extraction-eval, money parser (incl. the `Rp.`-prefix 1000× regression CORD exposed), VLM parse-completeness + token-logprob scalar confidence (incremental token→char spans, min-over-digits, guard-arming) + docTR OCR-confidence guards, shared KIE/date/money units + row-merge (split two-column recovery), confidence calibration (roc_auc separation, reliability bins, threshold sweep, oracle-pairing), pdf_text (pypdfium2 rect→Line geometry, PDF-route binding, synthetic renderer, real born-digital round-trip), deep PDF forensics (compressed blind-spot recovery, JS/OpenAction/AcroForm/overlay structural flags, the use_deep knob, byte-vs-deep harness contrast — skip-gated on [pdf-forensics]), CORD oracle mapping (qty/line-amount/discount-netting/sub-flatten/locale, pure on hand-built dicts), ExpressExpense glob (recursive, sorted, images-only, limit, fetch-hint on missing dir), learned fusion (feature-vector ordering by detector name + abstain→0, logistic separates separable data, deterministic fit, the noisy-detector-down-weight mechanism, pluggable-combiner override + clamp + noisy-OR-unchanged guard, .explain magnitude-sort) + fusion-bench smoke (synthetic-only run, real columns→n/a, provenance detectors flagged inactive)
 ```
 
 ## 7. How to add a new detection approach

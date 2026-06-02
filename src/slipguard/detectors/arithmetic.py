@@ -84,6 +84,12 @@ class ArithmeticConsistencyDetector(Detector):
 
         if r.subtotal is not None and have_items:
             bad, rel = self._err(r.subtotal, computed_subtotal)
+            # Tax-inclusive line prices: the lines legitimately total subtotal + tax (not the
+            # pre-tax subtotal) — common on Indonesian/EU menus. Only flag if NEITHER the
+            # tax-exclusive nor the tax-inclusive interpretation reconciles, so a genuine
+            # tax-inclusive receipt is not a false positive (the CORD subtotal!=Σlines cases).
+            if bad and r.tax_amount is not None:
+                bad, _ = self._err(r.subtotal + r.tax_amount, computed_subtotal)
             if bad:
                 failures.append((f"subtotal {r.subtotal} != sum(line items) {computed_subtotal}", rel))
 
@@ -94,10 +100,16 @@ class ArithmeticConsistencyDetector(Detector):
                 failures.append((f"tax {r.tax_amount} != rate*subtotal {expected_tax}", rel))
 
         if r.total is not None and ref_subtotal is not None:
-            expected_total = round(ref_subtotal + (r.tax_amount or 0.0), 2)
+            # total reconciles against subtotal + tax + service charge - discount. The
+            # service/discount terms default to 0 when absent, so a plain 3-field receipt is
+            # unchanged; a receipt that legitimately carries them no longer trips (the CORD
+            # total!=subtotal+tax cases, the measured FP this richer model was added to fix).
+            expected_total = round(ref_subtotal + (r.tax_amount or 0.0)
+                                   + (r.service_charge or 0.0) - (r.discount or 0.0), 2)
             bad, rel = self._err(r.total, expected_total)
             if bad:
-                failures.append((f"total {r.total} != subtotal+tax {expected_total}", rel))
+                label = "subtotal+tax+service-discount" if (r.service_charge or r.discount) else "subtotal+tax"
+                failures.append((f"total {r.total} != {label} {expected_total}", rel))
 
         # We can only judge if there is something to cross-check: a subtotal+total
         # pair, or line items. With neither, abstain rather than guess — this guard

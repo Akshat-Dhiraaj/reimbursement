@@ -223,9 +223,10 @@ the learned fuser is route-specific and noisy-OR remains the safe default.
   real corpora via `--corpus {wildreceipt,cord,expressexpense}` (`data/*.py` loaders).
   Two oracle corpora make the result robust: WildReceipt (US KIE) FP **0.364** traces to
   *lossy extraction*, while CORD (Indonesian gt_parse, clean labels) FP **0.170** traces to a
-  *too-narrow 3-field model* (service-charge / discount / tax-inclusive totals it can't
+  *too-narrow 3-field model* (service-charge / discount / tax-inclusive totals it couldn't
   represent) — different mechanisms, same conclusion: **the binding constraint is representation
-  completeness, not detector logic**.
+  completeness, not detector logic**. The model fix landed (#81: `service_charge` / `discount` +
+  tax-inclusive reconciliation) → CORD FP **0.170 → 0.030**, WildReceipt **0.364 → 0.324**.
 - `extraction.py` — `evaluate_extractors()` ranks extractors by field-level accuracy
   (vendor / date / subtotal / tax / total / line-count) against the WildReceipt oracle:
   the oracle Receipt is the reference, a candidate OCR/VLM extractor's output is the
@@ -320,7 +321,7 @@ src/slipguard/
     __init__.py           default/image/pdf_extractors() + extractor_for(route) registry
   detectors/
     base.py               Detector ABC (applicable/prime/score/run/_abstain)
-    arithmetic.py         line items -> subtotal -> tax -> total reconciliation
+    arithmetic.py         line items -> subtotal -> tax -> total reconciliation (total = sub+tax+service-discount; accepts tax-inclusive lines)
     taxid.py              python-stdnum GSTIN (IN) + EU VAT; abstains if unsupported
     datesanity.py         future / implausibly-old dates (today injectable)
     duplicate.py          exact + fuzzy resubmission match; prime()-d with history
@@ -345,7 +346,7 @@ src/slipguard/
     extraction.py         evaluate_extractors() -> field-accuracy leaderboard vs oracle
     calibration.py        summarize_calibration() -> does per-value confidence predict a misread?
     fusion_bench.py       compare_fusion() -> learned logistic fuser vs noisy-OR (real FP at matched recall; the fuser selector)
-tests/                    224 tests
+tests/                    229 tests
 ```
 
 ---

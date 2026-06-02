@@ -59,6 +59,13 @@ class Receipt:
     tax_rate: Optional[float] = None  # fraction, e.g. 0.18
     tax_amount: Optional[float] = None
     total: Optional[float] = None
+    #: extra money fields some real receipts carry — CORD's clean-oracle FP audit isolated
+    #: these as a measured false-positive source the 3-field model couldn't represent. A
+    #: service charge is added on top of subtotal+tax; a discount is subtracted. When present
+    #: they enter the arithmetic reconciliation (total == subtotal + tax + service - discount);
+    #: both default to 0 in that check, so a plain 3-field receipt behaves exactly as before.
+    service_charge: Optional[float] = None
+    discount: Optional[float] = None
     time: Optional[Time] = None
     payment_method: Optional[str] = None
     source: DocumentType = DocumentType.STRUCTURED

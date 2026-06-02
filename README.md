@@ -8,8 +8,10 @@ licences in the shipping path).
 > **For reviewers:** start here, then see [ARCHITECTURE.md](ARCHITECTURE.md) for the
 > high- and low-level flow, [DECISIONS.md](DECISIONS.md) for *what we used / didn't
 > use and why*, [ROADMAP.md](ROADMAP.md) for *what's done, what's left, and the
-> plan*, and [SCORECARD.md](SCORECARD.md) for the measured *pure-Python vs local-model
-> vs API* per-task comparison. [AI_context.md](AI_context.md) is the detailed handoff doc.
+> plan*, [SCORECARD.md](SCORECARD.md) for the measured *pure-Python vs local-model vs API*
+> per-task comparison, and [REFERENCES.md](REFERENCES.md) for the sourced choices (what we
+> picked over what, and why) with verified links. [AI_context.md](AI_context.md) is the
+> detailed handoff doc.
 
 ---
 
@@ -45,14 +47,14 @@ never the gate**.
 | Layer | Status | Evidence |
 |---|---|---|
 | Domain models + pluggable detector framework | ✅ Done | `models.py`, `detectors/base.py` |
-| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 224 tests; synthetic leaderboard |
+| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 229 tests; synthetic leaderboard |
 | **Per-task paradigm comparison** (pure-Python vs local-model vs API) | ✅ Done — measured | [SCORECARD.md](SCORECARD.md) |
 | Noisy-OR fusion + eval harness + CLI | ✅ Done | `slipguard eval` |
 | **Learned logistic fusion** (opt-in; same signals, learned weights) | ✅ Done (measured: real FP **0.175→0.042** at matched recall) | `slipguard eval-fusion` |
 | PDF provenance forensics (`pdf_meta`) | ✅ Done (byte scan **+ pikepdf deep layer**; **+ `/Prev` content-edit localization & signature edit-after-signing**) | `slipguard eval-pdf` · `eval-pdf-forensics` |
 | Image provenance forensics (`image_meta`) | ✅ Done (**EXIF + C2PA / Content Credentials** — signed AI-generation assertions) | `slipguard eval-image` |
 | Real-data false-positive audit | ✅ Done (**3 corpora**: WildReceipt, CORD, ExpressExpense) | `slipguard eval-real --corpus …` |
-| **IMAGE-route extraction (photo → fields)** | 🔶 **3 extractors: local VLM (Qwen2-VL-2B) + docTR + hosted Groq (API)** | `eval-extract` → macro **Groq 0.947ᴺ⁼¹² / VLM 0.725 / docTR 0.579** |
+| **IMAGE-route extraction (photo → fields)** | 🔶 **3 extractors: local VLM (Qwen2-VL-2B) + docTR + hosted Groq (API)** | `eval-extract` → macro **Groq 0.847ᴺ⁼⁵⁰ / VLM 0.725ᴺ⁼¹⁰⁰ / docTR 0.579** |
 | **PDF-route extraction (born-digital → fields)** | ✅ **Done — PDFs now score end-to-end (was provenance-only)** | `slipguard eval-pdf-extract` → macro **0.992** (pypdfium2) |
 | Image *pixel* forensics (AI-generated, tamper-localization) | ❌ Deferred (#60) — research-confirmed low ROI (FFT/ELA/PRNU collapse under recompression); lightweight provenance used instead | declared in label space only |
 | Real *fraud* corpora (positives) | ❌ Not started | data gap — real receipt sets are legitimate-only (see DECISIONS) |
@@ -73,7 +75,7 @@ pip install -e ".[dev]"
 #   pip install -e ".[pdf-forensics]"  # pikepdf deep PDF provenance/structure layer (MPL-2.0) — light, CPU-only
 #   pip install -e ".[c2pa]"  # C2PA / Content Credentials reader for image_meta (MIT/Apache) — CPU-only but ~260 MB
 
-python -m pytest                  # 224 tests
+python -m pytest                  # 229 tests
 slipguard eval                    # synthetic structured benchmark leaderboard
 slipguard eval-pdf                # synthetic PDF-provenance leaderboard
 slipguard eval-pdf-forensics      # compressed-PDF deep forensics: byte-only vs pikepdf recall (needs [pdf-forensics])
@@ -130,7 +132,9 @@ tar -xf datasets/wildreceipt.tar -C datasets
   menu prices are **tax-inclusive** (`total≠subtotal+tax` ×15, `subtotal≠Σlines` ×2). → *a second,
   Indonesian-locale corpus reaches the same conclusion by a different route — the binding
   constraint is representation completeness, not detector logic — and names a concrete fix: a
-  richer Receipt model. (Reproduce: `slipguard eval-real --corpus cord --limit 100`.)*
+  richer Receipt model. **— now implemented (#81): `Receipt` gained `service_charge` / `discount`
+  and the arithmetic check accepts tax-inclusive lines, cutting CORD's FP 0.170 → 0.030 (~5.7×)
+  and nudging WildReceipt 0.364 → 0.324.** (Reproduce: `slipguard eval-real --corpus cord --limit 100`.)*
 - **Extraction accuracy** (Qwen2-VL-2B-Instruct vs the WildReceipt oracle, 100 receipts):
   macro field-accuracy **0.725**, 0 extractor errors — vendor 0.880, date 0.915,
   subtotal 0.740, tax 0.614, total 0.598, line_count 0.602. Money/line-count are the
@@ -237,7 +241,7 @@ src/slipguard/
   data/            synthetic generators (images + born-digital PDFs + compressed deep-forensics PDFs) + real-corpus loaders (WildReceipt, CORD, ExpressExpense)
   eval/            metrics, ranking harness, false-positive audit, extraction-accuracy + confidence-calibration + learned-fusion benchmarks
   cli.py           `slipguard eval | eval-pdf | eval-pdf-forensics | eval-image | eval-real --corpus … | eval-extract | eval-pdf-extract | eval-calibration | eval-fusion | score`
-tests/             224 tests
+tests/             229 tests
 ```
 
 ## 7. Licence posture (summary)

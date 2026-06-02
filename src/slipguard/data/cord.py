@@ -16,9 +16,11 @@ Honest scope, by construction of the labels:
   * The money fields use Indonesian grouping (``24,000`` / ``60.000`` == 24000 / 60000).
     The shared ``money.parse_money`` reads these correctly because 3 trailing digits mark a
     thousands group, not a decimal — so no per-locale hack is needed (verified in tests).
-  * CORD totals legitimately include **service charge / discount** our 3-field model has no
-    slot for, so ``total != subtotal + tax`` can fire on a genuine receipt. That is a real
-    limitation of the data model (not detector logic) and the FP audit reports it honestly.
+  * CORD totals legitimately include **service charge / discount**, and some menus are
+    **tax-inclusive** — both were a *measured* FP source when the 3-field model dropped them.
+    The loader now maps ``service_price`` / ``discount_price`` into ``Receipt.service_charge`` /
+    ``discount`` (so ``total`` reconciles as subtotal+tax+service-discount), and the arithmetic
+    detector accepts tax-inclusive line prices (``Σlines ≈ subtotal+tax``) — closing those FPs.
 
 Currency is IDR / country ID, so the GSTIN tax-id detector abstains, as it should.
 
@@ -109,6 +111,11 @@ def _receipt_from_gt(gt_parse: dict, doc_id: str, image_path: Optional[str] = No
         subtotal=_money(sub_total.get("subtotal_price")),
         tax_amount=_money(sub_total.get("tax_price")),
         total=_money(total.get("total_price")),
+        # CORD carries these in gt_parse; modelling them lets `total` reconcile (they were a
+        # measured FP source when the 3-field model dropped them). service_price ×12 /
+        # discount_price ×6 across CORD-test (probed).
+        service_charge=_money(sub_total.get("service_price")),
+        discount=_money(sub_total.get("discount_price")),
         source=DocumentType.IMAGE,
         image_path=image_path,
     )
