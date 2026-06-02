@@ -25,6 +25,17 @@ from .base import Detector
 #: per-signal P(fraud) when a signal fires; combined by noisy-OR so corroborating
 #: signals compound (mirrors the verdict-level fuser).
 _INCREMENTAL = 0.85
+#: an incremental update that rewrote a page CONTENT stream (the displayed values), not
+#: just metadata. More specific than _INCREMENTAL: legitimate incremental updates exist
+#: (digital signatures, form fills) but they don't rewrite the page content, so a content
+#: rewrite after issuance is a strong "the visible amount was edited" signal -> slightly
+#: above the generic incremental weight. The two compound when both fire.
+_CONTENT_EDIT = 0.88
+#: bytes appended after a digital signature's /ByteRange — content added/edited AFTER the
+#: document was signed. Strong (a signed document should be final), but a single defect, so
+#: it routes to REVIEW on its own and compounds with any incremental/content signal it
+#: genuinely co-occurs with (an edit-after-signing is usually also an incremental update).
+_SIG_EDIT = 0.80
 _EDITOR = 0.82
 _DATE = 0.70
 #: structural risks (deep layer). JS / auto-run actions never appear in a genuine
@@ -34,6 +45,10 @@ _JAVASCRIPT = 0.80
 _OPEN_ACTION = 0.75
 _ACROFORM = 0.45
 _OVERLAY = 0.50
+#: a cover-and-relabel overlay drawn IN the page content stream (a white rectangle over
+#: pre-existing text, then a new value on top) — rarer/less legitimate than an overlay
+#: *annotation*, so slightly higher, but still suspicious-not-proof -> REVIEW.
+_CONTENT_OVERLAY = 0.55
 
 
 class PdfMetadataDetector(Detector):
@@ -67,9 +82,24 @@ class PdfMetadataDetector(Detector):
             date_gap = deep.date_gap_days
 
         parts: list[tuple[float, str]] = []
-        if prov.incremental_updates > 0:
+        # Disjoint accounting: a revision already explained as a content edit or as an
+        # edit-after-signing is NOT also counted as a generic incremental update — noisy-OR
+        # of two views of one revision would manufacture a spurious over-escalation (the
+        # more-specific signal already carries the higher weight). _INCREMENTAL covers only
+        # the appended revisions we did not otherwise localize.
+        sig_updates = 1 if prov.signature_uncovered_bytes > 0 else 0
+        other_incremental = max(0, prov.incremental_updates - prov.content_stream_edits - sig_updates)
+        if other_incremental > 0:
             parts.append((_INCREMENTAL,
-                          f"{prov.incremental_updates} incremental update(s) appended after original write"))
+                          f"{other_incremental} incremental update(s) appended after original write"))
+        if prov.content_stream_edits > 0:
+            parts.append((_CONTENT_EDIT,
+                          "incremental update rewrote the page content stream "
+                          "(displayed values edited after issuance)"))
+        if prov.signature_uncovered_bytes > 0:
+            parts.append((_SIG_EDIT,
+                          f"{prov.signature_uncovered_bytes} byte(s) appended after the "
+                          "digital signature was applied (edited after signing)"))
         if editor_tag:
             parts.append((_EDITOR, f"editor tool in metadata: {editor_tag}"))
         if date_gap is not None and date_gap > self.max_date_gap_days:
@@ -84,9 +114,16 @@ class PdfMetadataDetector(Detector):
             if deep.overlay_annotations > 0:
                 parts.append((_OVERLAY,
                               f"{deep.overlay_annotations} overlay annotation(s) that can cover values"))
+            if deep.content_overlays > 0:
+                parts.append((_CONTENT_OVERLAY,
+                              f"{deep.content_overlays} content-stream overlay(s) covering "
+                              "existing text (cover-and-relabel)"))
 
         evidence = {
             "incremental_updates": prov.incremental_updates,
+            "content_stream_edits": prov.content_stream_edits,
+            "is_signed": prov.is_signed,
+            "signature_uncovered_bytes": prov.signature_uncovered_bytes,
             "producer": prov.producer or (deep.producer if deep else None),
             "creator": prov.creator or (deep.creator if deep else None),
             "editor_tag": editor_tag,
@@ -102,6 +139,7 @@ class PdfMetadataDetector(Detector):
                 has_javascript=deep.has_javascript,
                 has_open_action=deep.has_open_action,
                 overlay_annotations=deep.overlay_annotations,
+                content_overlays=deep.content_overlays,
             )
 
         if not parts:

@@ -8,7 +8,12 @@ from datetime import date
 
 import pytest
 
-from slipguard.data.pdfsynth import build_compressed_pdf, generate_pdf_deep
+from slipguard.data.pdfsynth import (
+    build_compressed_pdf,
+    build_overlay_pdf,
+    build_text_pdf,
+    generate_pdf_deep,
+)
 from slipguard.detectors import default_detectors
 from slipguard.detectors.pdfmeta import PdfMetadataDetector
 from slipguard.eval.harness import evaluate
@@ -84,6 +89,18 @@ def test_deep_flags_overlay_annotation():
     assert deep.overlay_annotations == 1 and deep.has_structural_risk
 
 
+def test_deep_flags_content_stream_overlay():
+    # a white rectangle drawn over pre-existing text IN the content stream (cover-and-relabel)
+    deep = inspect_pdf_deep(build_overlay_pdf(_CLEAN))
+    assert deep.content_overlays == 1 and deep.has_structural_risk
+
+
+def test_clean_text_pdf_has_no_content_overlay():
+    # a normal text PDF draws no rectangle over pre-existing text -> not flagged (low FP)
+    data = build_text_pdf(["Reliance Fresh", "2026-01-10", "Coffee  4.50", "Total  4.50"], _CLEAN)
+    assert inspect_pdf_deep(data).content_overlays == 0
+
+
 def test_inspect_deep_never_raises_on_garbage():
     # pikepdf is stricter than the byte scan; a parse failure must degrade to None
     assert inspect_pdf_deep(b"not a real pdf at all") is None
@@ -115,6 +132,13 @@ def test_detector_acroform_is_review_weight(tmp_path):
     data = build_compressed_pdf(_CLEAN, acroform=True)
     s = PdfMetadataDetector().score(_pdf_receipt(tmp_path, "a", data))
     assert 0.3 < s.score < 0.5
+
+
+def test_detector_flags_content_overlay(tmp_path):
+    s = PdfMetadataDetector().score(_pdf_receipt(tmp_path, "co", build_overlay_pdf(_CLEAN)))
+    assert s.score > 0.4
+    assert any("cover-and-relabel" in r for r in s.reasons)
+    assert s.evidence["content_overlays"] == 1
 
 
 # --- harness: the byte-only vs deep contrast as a regression -----------------

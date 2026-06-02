@@ -7,8 +7,9 @@ licences in the shipping path).
 
 > **For reviewers:** start here, then see [ARCHITECTURE.md](ARCHITECTURE.md) for the
 > high- and low-level flow, [DECISIONS.md](DECISIONS.md) for *what we used / didn't
-> use and why*, and [ROADMAP.md](ROADMAP.md) for *what's done, what's left, and the
-> plan*. [AI_context.md](AI_context.md) is the detailed engineer/AI handoff doc.
+> use and why*, [ROADMAP.md](ROADMAP.md) for *what's done, what's left, and the
+> plan*, and [SCORECARD.md](SCORECARD.md) for the measured *pure-Python vs local-model
+> vs API* per-task comparison. [AI_context.md](AI_context.md) is the detailed handoff doc.
 
 ---
 
@@ -44,15 +45,16 @@ never the gate**.
 | Layer | Status | Evidence |
 |---|---|---|
 | Domain models + pluggable detector framework | ✅ Done | `models.py`, `detectors/base.py` |
-| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 198 tests; synthetic leaderboard |
+| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 224 tests; synthetic leaderboard |
+| **Per-task paradigm comparison** (pure-Python vs local-model vs API) | ✅ Done — measured | [SCORECARD.md](SCORECARD.md) |
 | Noisy-OR fusion + eval harness + CLI | ✅ Done | `slipguard eval` |
 | **Learned logistic fusion** (opt-in; same signals, learned weights) | ✅ Done (measured: real FP **0.175→0.042** at matched recall) | `slipguard eval-fusion` |
-| PDF provenance forensics (`pdf_meta`) | ✅ Done (byte scan **+ pikepdf deep layer**) | `slipguard eval-pdf` · `eval-pdf-forensics` |
-| Image-EXIF provenance forensics (`image_meta`) | ✅ Done (EXIF only) | `slipguard eval-image` |
+| PDF provenance forensics (`pdf_meta`) | ✅ Done (byte scan **+ pikepdf deep layer**; **+ `/Prev` content-edit localization & signature edit-after-signing**) | `slipguard eval-pdf` · `eval-pdf-forensics` |
+| Image provenance forensics (`image_meta`) | ✅ Done (**EXIF + C2PA / Content Credentials** — signed AI-generation assertions) | `slipguard eval-image` |
 | Real-data false-positive audit | ✅ Done (**3 corpora**: WildReceipt, CORD, ExpressExpense) | `slipguard eval-real --corpus …` |
-| **IMAGE-route extraction (photo → fields, OCR/VLM)** | 🔶 **Two extractors benchmarked head-to-head: VLM (Qwen2-VL-2B) leads, docTR OCR+KIE second** | `slipguard eval-extract` → macro **VLM 0.725 / docTR 0.579** |
+| **IMAGE-route extraction (photo → fields)** | 🔶 **3 extractors: local VLM (Qwen2-VL-2B) + docTR + hosted Groq (API)** | `eval-extract` → macro **Groq 0.947ᴺ⁼¹² / VLM 0.725 / docTR 0.579** |
 | **PDF-route extraction (born-digital → fields)** | ✅ **Done — PDFs now score end-to-end (was provenance-only)** | `slipguard eval-pdf-extract` → macro **0.992** (pypdfium2) |
-| Image *pixel* forensics (AI-generated, tamper-localization) | ❌ Not started | declared in label space only |
+| Image *pixel* forensics (AI-generated, tamper-localization) | ❌ Deferred (#60) — research-confirmed low ROI (FFT/ELA/PRNU collapse under recompression); lightweight provenance used instead | declared in label space only |
 | Real *fraud* corpora (positives) | ❌ Not started | data gap — real receipt sets are legitimate-only (see DECISIONS) |
 
 **Honest caveat:** the synthetic benchmark scores ~1.0 AUC, but that only validates
@@ -69,8 +71,9 @@ pip install -e ".[dev]"
 #   pip install -e ".[ocr]"   # docTR OCR + transparent keyword/position KIE (Apache-2.0) — heavy
 #   pip install -e ".[pdf]"   # pypdfium2 born-digital PDF text extractor (Apache/BSD) — light, CPU-only
 #   pip install -e ".[pdf-forensics]"  # pikepdf deep PDF provenance/structure layer (MPL-2.0) — light, CPU-only
+#   pip install -e ".[c2pa]"  # C2PA / Content Credentials reader for image_meta (MIT/Apache) — CPU-only but ~260 MB
 
-python -m pytest                  # 198 tests
+python -m pytest                  # 224 tests
 slipguard eval                    # synthetic structured benchmark leaderboard
 slipguard eval-pdf                # synthetic PDF-provenance leaderboard
 slipguard eval-pdf-forensics      # compressed-PDF deep forensics: byte-only vs pikepdf recall (needs [pdf-forensics])
@@ -200,6 +203,23 @@ tar -xf datasets/wildreceipt.tar -C datasets
   losing the positional letter-count tie, a shared-KIE limit, not a read failure. → *honest
   scope: text-layer only — a **scanned-image** PDF (no text layer) still belongs on the
   IMAGE/OCR route; rasterise-then-OCR is future work.*
+- **Lightweight provenance forensics — three new CPU-only signals (2026-06):** the
+  measured-and-researched alternative to heavy pixel-AI detection (a current survey confirms
+  pixel-AI is hype under our constraints — naive FFT collapses under recompression, ELA is
+  FP-prone, PRNU needs a per-camera reference we never have — so **#60 stays deferred**).
+  (1) **PDF `/Prev` object-diff** localizes *which* object an incremental update rewrote and
+  flags a rewritten page **content stream** (displayed values edited after issuance) vs a
+  metadata re-save. (2) **PDF signature `/ByteRange` coverage** flags content appended *after* a
+  digital signature (edit-after-signing) — plus a bonus FP fix so a legitimately signed PDF no
+  longer trips the fillable-form signal. (3) **C2PA / Content Credentials** reads a signed
+  manifest's `digitalSourceType`: a `trainedAlgorithmicMedia` assertion (Firefly / DALL·E / Sora
+  / Imagen) is the one *trustworthy positive* that a photo is AI-generated/edited. `eval-pdf` /
+  `eval-image` hold at recall **1.0** / FP **0.0** on the synthetic corpora. → *honest scope: PDF
+  `/Prev` is classic-xref-only; signature & C2PA are high-precision / **low-recall** (most
+  receipts are unsigned / carry no manifest), so the durable backstop against a careful edit
+  remains arithmetic + duplicate. C2PA's `c2pa-python` is ~260 MB installed but CPU-only; C2PA
+  detection is deterministic schema-parsing, validated by unit tests + a real-`Reader`
+  integration test, not a synthetic benchmark.*
 
 ## 6. Repository layout
 
@@ -213,11 +233,11 @@ src/slipguard/
   money.py         parse_money(): shared US/EU-aware money parser (oracle + VLM extractor)
   extractors/      one file per extraction approach (Structured, Qwen2-VL, docTR-OCR, PDF-text) + the shared KIE (kie.py) + ABC + registry
   detectors/       one file per detection method + the Detector ABC + registry
-  forensics/       provenance inspectors: PDF (dependency-free bytes + optional pikepdf deep layer) + image EXIF (Pillow)
+  forensics/       provenance inspectors: PDF (bytes: %%EOF/editor/date + /Prev content-edit + signature /ByteRange coverage; optional pikepdf deep) + image EXIF (Pillow) + C2PA Content Credentials (optional [c2pa])
   data/            synthetic generators (images + born-digital PDFs + compressed deep-forensics PDFs) + real-corpus loaders (WildReceipt, CORD, ExpressExpense)
   eval/            metrics, ranking harness, false-positive audit, extraction-accuracy + confidence-calibration + learned-fusion benchmarks
   cli.py           `slipguard eval | eval-pdf | eval-pdf-forensics | eval-image | eval-real --corpus … | eval-extract | eval-pdf-extract | eval-calibration | eval-fusion | score`
-tests/             198 tests
+tests/             224 tests
 ```
 
 ## 7. Licence posture (summary)
@@ -227,5 +247,7 @@ only. We deliberately **avoid** LayoutLMv3 (CC-BY-NC), DocTamper (NC), FUNSD (NC
 Surya (GPL), INV-CDIP (CC-BY-NC), and the *Find-it-again!* forgery set (licence
 unclear / research-only). The three real-receipt corpora now wired for the FP audit are all
 commercial-safe: **WildReceipt** (Apache-2.0), **CORD** (CC-BY-4.0), and **ExpressExpense**
-(MIT, images only) — alongside **docTR / PaddleOCR** (Apache-2.0) and `python-stdnum` (LGPL,
-fine as a dependency). Rationale and the full table are in [DECISIONS.md](DECISIONS.md).
+(MIT, images only) — alongside **docTR / PaddleOCR** (Apache-2.0), **pikepdf** (MPL-2.0) /
+**pypdfium2** (Apache/BSD), **c2pa-python** (MIT/Apache, the Content Credentials reader),
+**fontTools** (MIT), and `python-stdnum` (LGPL, fine as a dependency). We deliberately avoid
+**AGPL PyMuPDF** for PDF work. Rationale and the full table are in [DECISIONS.md](DECISIONS.md).

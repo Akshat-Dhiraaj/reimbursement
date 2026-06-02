@@ -46,6 +46,14 @@ pdf = [
 pdf-forensics = [
     "pikepdf>=8",
 ]
+# C2PA / Content Credentials reader (the IMAGE route's cryptographic-provenance signal):
+# detects a signed AI-generated/edited assertion (Firefly/DALL-E/Sora/Imagen) or a signed
+# camera capture. c2pa-python is MIT/Apache (bundles the Rust c2pa-rs), CPU-only and
+# network-free for reads — but a heavy install (~260 MB of native wheels), so it is kept
+# optional; image_meta abstains on this source when absent (falls back to EXIF).
+c2pa = [
+    "c2pa-python>=0.32",
+]
 
 [project.scripts]
 slipguard = "slipguard.cli:main"

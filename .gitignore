@@ -27,6 +27,12 @@ htmlcov/
 *.pt
 *.onnx
 
+# Secrets — never commit API keys / credentials. Real values live in a local
+# .env (or the shell env); commit only .env.example with placeholder keys.
+.env
+.env.*
+!.env.example
+
 # OS / editor
 .DS_Store
 .idea/

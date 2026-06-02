@@ -1,6 +1,6 @@
 from datetime import date
 
-from slipguard.data.pdfsynth import build_pdf, generate_pdf
+from slipguard.data.pdfsynth import build_pdf, build_signed_pdf, generate_pdf
 from slipguard.detectors import default_detectors
 from slipguard.detectors.pdfmeta import PdfMetadataDetector
 from slipguard.eval.harness import evaluate
@@ -43,6 +43,35 @@ def test_inspect_incremental_update():
     assert p.eof_count == 2 and p.incremental_updates == 1
 
 
+def test_inspect_content_edit_is_localized():
+    # an incremental revision that rewrites the page CONTENT stream (object 4) is
+    # localized as a content edit via the /Prev xref object-diff.
+    p = inspect_pdf(build_pdf(_CLEAN, incremental_content="Total 900.00"))
+    assert p.incremental_updates == 1 and p.content_stream_edits == 1
+
+
+def test_inspect_metadata_incremental_is_not_a_content_edit():
+    # rewriting only the Info dict (object 5) is an incremental update but NOT a content
+    # edit — the diff distinguishes a metadata patch from a displayed-value patch.
+    p = inspect_pdf(build_pdf(_CLEAN, incremental=dict(_CLEAN)))
+    assert p.incremental_updates == 1 and p.content_stream_edits == 0
+
+
+def test_inspect_clean_has_no_content_edit():
+    assert inspect_pdf(build_pdf(_CLEAN)).content_stream_edits == 0
+
+
+def test_inspect_clean_signed_pdf_is_fully_covered():
+    p = inspect_pdf(build_signed_pdf(_CLEAN))
+    assert p.is_signed and p.signature_uncovered_bytes == 0
+
+
+def test_inspect_edit_after_signing_is_flagged():
+    # bytes appended after the signature's /ByteRange -> edit-after-signing
+    p = inspect_pdf(build_signed_pdf(_CLEAN, tamper=True))
+    assert p.is_signed and p.signature_uncovered_bytes > 0
+
+
 def test_inspect_malformed_never_raises():
     p = inspect_pdf(b"not a real pdf at all")
     assert p.eof_count == 0 and p.producer is None
@@ -68,6 +97,32 @@ def test_detector_date_mismatch_is_high(tmp_path):
 def test_detector_incremental_is_high(tmp_path):
     data = build_pdf(_CLEAN, incremental=dict(_CLEAN))
     assert PdfMetadataDetector().score(_pdf_receipt(tmp_path, "i", data)).score > 0.6
+
+
+def test_detector_content_edit_is_high_and_explained(tmp_path):
+    # a content-stream rewrite scores high AND is explained + evidenced as such, not just
+    # as a generic incremental update — the localization the /Prev diff buys.
+    data = build_pdf(_CLEAN, incremental_content="Total 900.00")
+    s = PdfMetadataDetector().score(_pdf_receipt(tmp_path, "ce", data))
+    assert s.score > 0.6
+    assert any("content stream" in r for r in s.reasons)
+    assert s.evidence["content_stream_edits"] == 1
+
+
+def test_detector_clean_signed_is_low(tmp_path):
+    # a legitimately signed PDF (signature-only AcroForm, /ByteRange covers the file) must
+    # NOT be flagged — neither for the signature nor as a fillable-form overlay.
+    s = PdfMetadataDetector().score(_pdf_receipt(tmp_path, "sig-ok", build_signed_pdf(_CLEAN)))
+    assert not s.abstained and s.score < 0.1
+    assert s.evidence["is_signed"] is True and s.evidence["signature_uncovered_bytes"] == 0
+
+
+def test_detector_edit_after_signing_is_high_and_explained(tmp_path):
+    data = build_signed_pdf(_CLEAN, tamper=True)
+    s = PdfMetadataDetector().score(_pdf_receipt(tmp_path, "sig-bad", data))
+    assert s.score > 0.6
+    assert any("signing" in r for r in s.reasons)
+    assert s.evidence["signature_uncovered_bytes"] > 0
 
 
 def test_detector_abstains_without_source_path():

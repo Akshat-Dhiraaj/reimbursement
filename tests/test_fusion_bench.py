@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import math
 
-from slipguard.data.synth import generate
+import pytest
+
+from slipguard.data.synth import Dataset, generate
 from slipguard.eval.fusion_bench import compare_fusion
 
 
@@ -34,3 +36,21 @@ def test_compare_fusion_runs_synthetic_only():
     assert "pdf_meta" in cmp.inactive and "image_meta" in cmp.inactive
     # report renders without error
     assert "Learned fusion vs noisy-OR" in str(cmp)
+
+
+def test_multiroute_training_earns_provenance_weights(tmp_path):
+    # the route-specific gap (#77): with PDF + image provenance fraud merged into training,
+    # pdf_meta/image_meta earn non-zero weights instead of the structured-only zero above.
+    pytest.importorskip("PIL")  # image synth (EXIF JPEGs) needs Pillow
+    from slipguard.data.imagesynth import generate_image
+    from slipguard.data.pdfsynth import generate_pdf
+
+    def merged(seed: int) -> Dataset:
+        s = generate(n_clean=20, fraud_per_type=6, n_history=20, seed=seed)
+        pdf = generate_pdf(n_clean=10, fraud_per_type=5, seed=seed, workdir=tmp_path / f"pdf{seed}")
+        img = generate_image(n_clean=10, fraud_per_type=5, seed=seed, workdir=tmp_path / f"img{seed}")
+        return Dataset(history=s.history, samples=s.samples + pdf.samples + img.samples)
+
+    cmp = compare_fusion(merged(0), merged(1), [], iters=800)
+    assert "pdf_meta" not in cmp.inactive and "image_meta" not in cmp.inactive
+    assert cmp.weights["pdf_meta"] > 0.0 and cmp.weights["image_meta"] > 0.0

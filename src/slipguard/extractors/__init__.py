@@ -14,14 +14,15 @@ from typing import Optional
 from ..models import DocumentType
 from .base import Extractor
 from .doctr_ocr import DocTROCRExtractor
+from .groq_vlm import GroqVLExtractor
 from .pdf_text import PdfTextExtractor
 from .structured import StructuredExtractor
 from .vlm_qwen import QwenVLExtractor
 
 __all__ = [
     "Extractor", "StructuredExtractor", "QwenVLExtractor", "DocTROCRExtractor",
-    "PdfTextExtractor", "default_extractors", "image_extractors", "pdf_extractors",
-    "image_extractor_for_spec", "extractor_for",
+    "GroqVLExtractor", "PdfTextExtractor", "default_extractors", "image_extractors",
+    "pdf_extractors", "image_extractor_for_spec", "extractor_for",
 ]
 
 
@@ -62,6 +63,10 @@ def image_extractor_for_spec(spec: str) -> Extractor:
         return DocTROCRExtractor()
     if spec == "vlm":
         return QwenVLExtractor()
+    if spec == "groq":
+        return GroqVLExtractor()
+    if spec.startswith("groq:"):  # groq:<model-id> selects a specific Groq model
+        return GroqVLExtractor(model_id=spec[len("groq:"):])
     return QwenVLExtractor(model_id=spec)
 
 

@@ -27,8 +27,8 @@ flowchart TD
       D3[date_sanity<br/>future / very old]
       D4[duplicate<br/>resubmission match]
       D5[pdf_meta<br/>PDF provenance]
-      D6[image_meta<br/>image EXIF provenance]
-      D7[image pixel forensics<br/>PLANNED, weak signal]
+      D6[image_meta<br/>image EXIF + C2PA provenance]
+      D7[image pixel forensics<br/>DEFERRED #60, weak signal]
     end
     D --> DET
 
@@ -178,8 +178,8 @@ irrelevant ones polluting the risk score (e.g. `tax_id` abstains on a US receipt
 | **tax_id** | `country`, `vendor_tax_id` | GSTIN/VAT fails format/checksum (`python-stdnum`) | unsupported country or no tax-id |
 | **date_sanity** | `date` | future date (0.92), or > 5y old (0.6, weak) | no date |
 | **duplicate** | `vendor`, `date`, `total` vs primed history | exact (vendor,date,total) match, or fuzzy vendor + same date + ~amount | no total |
-| **pdf_meta** | `source_path` (PDF bytes; + pikepdf deep layer when `[pdf-forensics]` present) | **L1 bytes:** incremental update (extra `%%EOF`), editor tag in `/Producer`·`/Creator`, ModDate ≫ CreationDate. **L2 pikepdf:** the editor tag / date gap recovered from compressed object-stream + XMP metadata, plus structural anomalies — JavaScript, OpenAction, AcroForm, overlay annotations | non-PDF route, no source file |
-| **image_meta** | `source_path` (image EXIF, via Pillow) | image editor in EXIF `Software` (Photoshop/GIMP/…), or `DateTime` ≫ `DateTimeOriginal` (capture-vs-modify gap) | non-IMAGE route, no source file, Pillow absent, or **no EXIF** (stripped/screenshot/AI — not guilt) |
+| **pdf_meta** | `source_path` (PDF bytes; + pikepdf deep layer when `[pdf-forensics]` present) | **L1 bytes:** incremental update (extra `%%EOF`), **`/Prev` object-diff content-edit localization** (which object an update rewrote → page content stream = displayed values edited), **signature `/ByteRange` edit-after-signing**, editor tag in `/Producer`·`/Creator`, ModDate ≫ CreationDate. **L2 pikepdf:** editor tag / date gap from compressed object-stream + XMP, plus structural anomalies — JavaScript, OpenAction, AcroForm (signature-only exempt), overlay annotations. *Disjoint accounting:* correlated sub-signals counted once | non-PDF route, no source file |
+| **image_meta** | `source_path` (C2PA manifest via `[c2pa]`; image EXIF via Pillow) | **C2PA:** a signed `trainedAlgorithmicMedia` assertion → AI-generated/edited (a *trustworthy positive*); `digitalCapture` → camera (weak exonerate). **EXIF:** image editor in `Software` (Photoshop/GIMP/…), or `DateTime` ≫ `DateTimeOriginal` gap | non-IMAGE route, no source file, or **neither a C2PA manifest nor EXIF** (stripped/screenshot/AI — not guilt) |
 
 Each is single-purpose by design: it scores high on *its* subtype and abstains or
 scores low elsewhere — which is why a single detector's overall AUC is ~0.625 on a
@@ -247,17 +247,22 @@ the learned fuser is route-specific and noisy-OR remains the safe default.
   0.175 → 0.042 (~4×) at matched recall, AUC 0.867 → 0.990** — by down-weighting the noisy
   `arithmetic` signal (legible weights). **This is the fuser selector**, mirroring `harness.py`.
 
-### 2.9 Forensics — `forensics/pdf.py`, `forensics/image.py`
+### 2.9 Forensics — `forensics/pdf.py`, `forensics/image.py`, `forensics/c2pa.py`
 PDF provenance is **two layers, by design**, so the cheap path needs no dependency and
 the deep path is an optional extra:
 
 * **Layer 1 — `inspect_pdf(bytes_or_path)` → `PdfProvenance`** (eof_count, producer,
-  creator, creation/mod dates, matched editor tag, date-gap days). **Dependency-free**:
-  raw bytes + regex over the literal Info dict. Never raises. Its blind spot is a modern
-  **compressed** PDF (PDF 1.5+ stores the Info dict in an object/xref stream, metadata may
-  live only in XMP) — there the string fields read `None`, while the `%%EOF` count (the
-  incremental-update signal) stays reliable. Most real ERP/portal exports are exactly such
-  compressed PDFs.
+  creator, creation/mod dates, matched editor tag, date-gap days, **`content_stream_edits`**
+  from a `/Prev` xref object-diff, **`signature_uncovered_bytes`** from the signature
+  `/ByteRange`). **Dependency-free**: raw bytes + regex over the literal Info dict. Never
+  raises. Its blind spot is a modern **compressed** PDF (PDF 1.5+ stores the Info dict in an
+  object/xref stream, metadata may live only in XMP) — there the string fields read `None`,
+  while the `%%EOF` count (the incremental-update signal) stays reliable. Two byte-layer
+  localizers ride alongside it: a **`/Prev` object-diff** flags *which* object an incremental
+  update rewrote (a rewritten page **content stream** = displayed values edited after
+  issuance, distinct from a metadata re-save — classic xref tables only), and a **signature
+  `/ByteRange` coverage** check flags bytes appended *after* a digital signature
+  (edit-after-signing; works on compressed PDFs since `/ByteRange` is always in the clear).
 * **Layer 2 — `inspect_pdf_deep(bytes_or_path)` → `DeepPdfProvenance | None`** (the optional
   `[pdf-forensics]` extra, **pikepdf** — MPL-2.0, a qpdf binding, deliberately *not* AGPL
   PyMuPDF). Decodes object/xref streams + XMP, so it **recovers the editor tag / date gap
@@ -280,6 +285,17 @@ on a non-image / EXIF-less file (returns `has_exif=False`). Design choice: **mis
 EXIF is not guilt** — it is common in legitimate shared receipts as well as
 stripped/AI images — so the detector abstains rather than accuses.
 
+`inspect_c2pa(path)` → `C2paProvenance` (`forensics/c2pa.py`, the optional `[c2pa]` extra —
+**c2pa-python**, MIT/Apache, wrapping the Rust c2pa-rs; ~260 MB installed but CPU-only /
+network-free / ms-per-read). Reads a **cryptographically signed** Content Credentials manifest
+and classifies its `digitalSourceType` via a schema-agnostic recursive search:
+`trainedAlgorithmicMedia` / composite → **AI-generated/edited** (the one IMAGE *trustworthy
+positive*, not a heuristic), `digitalCapture` → camera (weak exoneration), else unknown.
+`image_meta` aggregates **C2PA + EXIF** and abstains only when neither is present. Honest:
+high-precision / **near-zero-recall** (sparse adoption + strippable; absence → abstain), and a
+deterministic schema-parse — so it is validated by unit tests + a real-`Reader` integration test,
+not a synthetic benchmark (minting a *signed* fixture fights c2pa-rs's strict cert profile).
+
 ---
 
 ## 3. Module map
@@ -298,6 +314,7 @@ src/slipguard/
     kie.py                shared keyword/position KIE: Line(text,y,conf,x) -> receipt_from_lines() (docTR + PDF)
     structured.py         StructuredExtractor: Receipt JSON -> Receipt (dependency-free)
     vlm_qwen.py           QwenVLExtractor: image -> Receipt via Qwen2-VL (lazy torch/transformers)
+    groq_vlm.py           GroqVLExtractor: image -> Receipt via Groq hosted VLM (API paradigm); reuses the Qwen prompt+parser, stdlib urllib (no new dep), GROQ_API_KEY, 429 backoff
     doctr_ocr.py          DocTROCRExtractor: image -> OCR boxes -> shared KIE (lazy torch/doctr)
     pdf_text.py           PdfTextExtractor: born-digital PDF text rects -> shared KIE (lazy pypdfium2)
     __init__.py           default/image/pdf_extractors() + extractor_for(route) registry
@@ -307,12 +324,13 @@ src/slipguard/
     taxid.py              python-stdnum GSTIN (IN) + EU VAT; abstains if unsupported
     datesanity.py         future / implausibly-old dates (today injectable)
     duplicate.py          exact + fuzzy resubmission match; prime()-d with history
-    pdfmeta.py            PDF provenance signal (byte inspect_pdf + pikepdf inspect_pdf_deep; use_deep knob)
-    imagemeta.py          image EXIF provenance signal (reads forensics.inspect_image)
+    pdfmeta.py            PDF provenance signal: incremental/+/Prev content-edit/+signature coverage/editor/date/structural (byte inspect_pdf + pikepdf inspect_pdf_deep; use_deep knob; disjoint accounting)
+    imagemeta.py          image provenance signal: C2PA Content Credentials (AI-gen) + EXIF editor/date (forensics.c2pa + forensics.image); abstains only when neither present
     __init__.py           default_detectors() — the canonical ranked set
   forensics/
-    pdf.py                PDF provenance: L1 dependency-free bytes + L2 pikepdf deep (optional [pdf-forensics])
+    pdf.py                PDF provenance: L1 bytes (%%EOF/editor/date + /Prev content-edit + signature /ByteRange) + L2 pikepdf deep (optional [pdf-forensics])
     image.py              image EXIF provenance inspector (Pillow, lazy)
+    c2pa.py               C2PA / Content Credentials reader (optional [c2pa], MIT/Apache): manifest digitalSourceType -> AI-generated/camera/unknown (lazy c2pa-python)
   data/
     synth.py              synthetic structured clean+fraud generator
     pdfsynth.py           synthetic PDF generator: byte-layout tampers, minted text PDFs (extraction oracle), compressed deep-forensics corpus
@@ -327,7 +345,7 @@ src/slipguard/
     extraction.py         evaluate_extractors() -> field-accuracy leaderboard vs oracle
     calibration.py        summarize_calibration() -> does per-value confidence predict a misread?
     fusion_bench.py       compare_fusion() -> learned logistic fuser vs noisy-OR (real FP at matched recall; the fuser selector)
-tests/                    198 tests
+tests/                    224 tests
 ```
 
 ---

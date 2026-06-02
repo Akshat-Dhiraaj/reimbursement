@@ -11,7 +11,11 @@
 > selector — CORD's oracle FP audit corroborates the WildReceipt finding on a second,
 > Indonesian-locale corpus; **learned logistic fusion (#62) measured against noisy-OR —
 > cuts real-corpus false positives 0.175→0.042 at matched fraud-recall by down-weighting the
-> noisy arithmetic signal; noisy-OR stays the zero-training default, learned is opt-in**).
+> noisy arithmetic signal; noisy-OR stays the zero-training default, learned is opt-in**;
+**lightweight provenance/container forensics (M3, in progress): PDF `/Prev` content-edit
+localization (#71), signature edit-after-signing (#72), and C2PA Content Credentials
+AI-generation reading (#76) — provenance signals chosen over heavy pixel-AI detection, which
+stays deferred (#60) as measured/researched hype under our constraints**).
 
 ## 1. What this is
 
@@ -395,6 +399,80 @@ zero-training default; learned fusion is opt-in and selected by these numbers** 
 richer-`Receipt`-model work from #61 remains the complementary, bigger lever). **198 tests pass**
 (+11: 10 learned-fuser unit + 1 fusion-bench smoke). (Reproduce: `slipguard eval-fusion`.)
 
+**Lightweight provenance/container forensics (M3, in progress — #71/#72/#76).** Pushed
+metadata/structure forensics further on both routes — the measured-and-researched alternative to
+heavy pixel-AI detection. A current survey confirms pixel-AI is **hype under our constraints**:
+naive FFT AI-detection degrades under recompression, ELA is FP-prone, and PRNU needs a per-camera
+reference we never have for inbound third-party receipts — so **#60 stays deferred**. Each new
+signal is a pluggable sub-signal behind the existing `pdf_meta` / `image_meta` detectors.
+- **PDF `/Prev` object-diff (#71, dependency-free, Layer 1).** Beyond "an incremental update
+  exists," it diffs the `/Prev` xref chain to localize *which* object an update rewrote, and flags
+  a rewritten page **content stream** (displayed values edited after issuance) — distinct from a
+  harmless metadata re-save. New `content_stream_edits` field + `_CONTENT_EDIT` signal + a
+  `content_edit` synthetic fraud. **Measured (`eval-pdf`):** `pdf_meta` recall 1.0 / FP 0.0 / AUC
+  1.0 on the enlarged byte corpus; content edits → REVIEW. Honest limits: **classic xref tables
+  only** (a compressed xref-stream PDF can't be byte-localized → reported 0, never a false
+  positive); a full "Save As" rewrite flattens history and defeats it.
+- **PDF signature `/ByteRange` coverage (#72, dependency-free).** Detects content appended *after*
+  a PDF was digitally signed (bytes outside the signature's `/ByteRange` = edit-after-signing);
+  works on compressed PDFs too (the `/ByteRange` is always in the clear). Plus a real FP fix the
+  signed fixtures surfaced — the deep layer was flagging *every* signed PDF as a suspicious
+  fillable-form overlay; now a **signature-only AcroForm** (the benign cousin) is exempt.
+  **Measured:** recall 1.0 / FP 0.0 on the `signature_tamper` corpus. Honest: **low real-world
+  recall** (most receipts aren't signed — high-precision / low-recall). *Deferred:*
+  producer-vs-structure (needs verified producer fingerprints — grouped with the JPEG-fingerprint
+  work; both need real reference data, not fabricated tables).
+- **C2PA / Content Credentials (#76, optional `[c2pa]` extra).** Reads a cryptographically signed
+  provenance manifest: a `trainedAlgorithmicMedia` assertion (Firefly / DALL·E / Sora / Imagen) →
+  **AI-generated/edited** (the one IMAGE signal that is a *trustworthy positive*, not a heuristic);
+  a `digitalCapture` (Pixel 10 / Galaxy S25) → genuine capture (weak exoneration). Folded into
+  `image_meta` (now aggregates **C2PA + EXIF**, abstaining only when neither is present;
+  `forensics/c2pa.py`, lazy-imported). `c2pa-python` (MIT/Apache) measured at **261 MB** installed
+  but CPU-only / network-free / ~ms-per-read. Honest: **high-precision / near-zero-recall** (sparse
+  adoption, strippable; absence → abstain); C2PA detection is *deterministic schema parsing*, not
+  an AUC, so it is validated by unit tests (schema-agnostic recursive parse) + a real-`Reader`
+  integration test — **not** a synthetic benchmark (minting a *signed* fixture fights c2pa-rs's
+  strict signing-cert profile and wasn't worth it).
+- **Disjoint accounting (a correctness principle, applied twice).** A content edit IS an
+  incremental update, and an edit-after-signing IS an incremental update — so these correlated
+  sub-signals are counted **once**, not noisy-OR-compounded into a spurious over-escalation,
+  keeping a single provenance defect at REVIEW ("metadata alone never auto-rejects").
+- **New commercial-safe deps:** `c2pa-python` (MIT/Apache, `[c2pa]`); `fontTools` (MIT) approved
+  for the next signal (#73, not yet used). **215 tests pass** (+17 since #62: 4 `/Prev` + 4
+  signature + 9 C2PA). Remaining lightweight signals queued: **#73** PDF font/coordinate anomalies,
+  **#74** JPEG quant-table fingerprinting (needs real reference data), **#75** EXIF thumbnail
+  mismatch.
+
+**Forensics done + the API paradigm + the scorecard (2026-06-02 — #73/#77/#79/#80).**
+- **#73 content-stream overlay:** a minimal pikepdf content-stream interpreter (tracks CTM +
+  text origins + white fills) flags a white rectangle drawn over *pre-existing* text —
+  cover-and-relabel done IN the content stream (distinct from the annotation overlays #57
+  catches). Low-FP by construction (a legit table-cell fill draws its rect *before* the text).
+  The **font-substitution** half is **deferred** (a low-FP version needs embedded-font fixtures
+  — our synth PDFs use base-14 non-embedded Helvetica — + real-PDF FP validation; same
+  real-data bucket as #74/#75, so `fontTools` stays approved-but-unused).
+- **#77 route-aware fuser:** closed the documented "learned fuser zeroes pdf_meta/image_meta"
+  gap **without touching the fuser** — its features key by detector NAME and pdf_meta/image_meta
+  gate by route, so **merging synthetic PDF + image provenance fraud into training**
+  (`eval-fusion --multiroute`) populates their columns → **pdf_meta +6.98 / image_meta +6.30**
+  (now the *highest* weights; were 0.000), arithmetic lowest +1.62, no inactive; real-legit AUC
+  0.820 → 0.994.
+- **#79 Groq hosted-VLM extractor = the API paradigm:** `extractors/groq_vlm.py` reuses the Qwen
+  prompt + JSON→Receipt parser (DRY), **stdlib `urllib` (no new dep)**, reads `GROQ_API_KEY` from
+  env (never stored), model `meta-llama/llama-4-scout-17b-16e-instruct`. **Measured (`eval-extract
+  --extractor groq`): macro 0.947 (N=12, 0 errors)** vs local Qwen2-VL-2B **0.725** (N=100) /
+  docTR 0.579 — a big hosted model reads markedly better. Two real findings: Groq's Cloudflare
+  **1010-blocks default urllib/datacenter UAs** (→ browser UA, datacenter/CI only); the **free
+  tier rate-limits** rapid batches (8/15 → 429) so we added **429 retry-with-backoff** (0/12
+  after). N=12 is small vs 100, so 0.947 is a small-sample estimate — direction is robust.
+- **#80 `SCORECARD.md`:** the per-task **pure-Python vs local-model vs API** matrix — the binding
+  **gap is photo→field extraction** (pure-Python can't read pixels; local-small 0.725 is
+  private+heavy-GPU; API-big 0.947 is accurate but egress+rate-limits); detection / fusion /
+  PDF+structured extraction are well-served by pure-Python + light CPU libs. Recommends a
+  **cascade**, with photo extraction the one local-vs-API fork (decided by data-egress policy).
+- New deps this batch: **none** (`urllib` is stdlib). **224 tests pass** (+9: 3 content-overlay,
+  1 multiroute-fuser, 5 Groq-offline). #74/#75/#60 stay deferred (real-data / heavy-pixel bucket).
+
 ## 4. Quickstart
 
 ```bash
@@ -405,16 +483,17 @@ pip install -e ".[dev]"          # editable install + pytest
 #   pip install -e ".[ocr]"      # docTR OCR + transparent keyword/position KIE — heavy
 #   pip install -e ".[pdf]"      # pypdfium2 born-digital PDF text extractor (Apache/BSD) — light, CPU-only
 #   pip install -e ".[pdf-forensics]"  # pikepdf deep PDF provenance/structure layer (MPL-2.0) — light, CPU-only
+#   pip install -e ".[c2pa]"     # C2PA / Content Credentials reader for image_meta (MIT/Apache) — CPU-only but ~260 MB
 
-python -m pytest                 # run tests (198)
+python -m pytest                 # run tests (224)
 slipguard eval                   # structured benchmark leaderboard
 slipguard eval-pdf               # PDF-provenance benchmark leaderboard
 slipguard eval-pdf-forensics     # compressed-PDF deep forensics: byte-only vs pikepdf recall (needs [pdf-forensics])
 slipguard eval-image             # image-EXIF provenance benchmark leaderboard (needs Pillow, the [vlm] extra)
 slipguard eval-real --corpus cord   # real-receipt FP audit; --corpus {wildreceipt|cord|expressexpense}
-slipguard eval-extract           # rank IMAGE extractors (docTR vs VLM) on field accuracy vs the oracle (--corpus wildreceipt|cord)
+slipguard eval-extract           # rank IMAGE extractors (docTR vs VLM) on field accuracy vs the oracle; --extractor groq scores ONLY the hosted API (needs GROQ_API_KEY)
 slipguard eval-pdf-extract       # rank PDF extractor(s) on field accuracy vs a synthetic oracle (needs [pdf])
-slipguard eval-fusion            # measure the learned logistic fuser vs noisy-OR (real-FP at matched recall + legible weights)
+slipguard eval-fusion            # learned logistic fuser vs noisy-OR (real-FP at matched recall + legible weights); --multiroute trains pdf_meta/image_meta too
 slipguard score data/demo.json   # score one receipt JSON (see data/demo.json)
 
 # Fetch the real corpora for eval-real (not committed; all commercial-safe):
@@ -471,6 +550,7 @@ src/slipguard/
     structured.py         StructuredExtractor: Receipt JSON -> Receipt (dependency-free)
     kie.py                shared keyword/position KIE: positioned Lines -> Receipt (used by docTR + pdf_text); pure, model-free
     vlm_qwen.py           VLM extractor (Qwen2-VL-2B default, apache-2.0); IMAGE route; lazy torch/transformers
+    groq_vlm.py           Groq hosted-VLM extractor (the API paradigm): reuses the Qwen prompt + JSON→Receipt parser, stdlib urllib (no new dep), GROQ_API_KEY from env, 429 retry-backoff; IMAGE route
     doctr_ocr.py          OCR extractor (docTR det+reco, apache-2.0) -> flattens export into kie.Line; IMAGE route; lazy doctr/torch
     pdf_text.py           born-digital PDF text extractor (pypdfium2, Apache/BSD) -> kie.Line; PDF route; lazy pypdfium2
     __init__.py           registry: default_extractors / image_extractors (VLM+docTR) / pdf_extractors (pdf_text) / image_extractor_for_spec / extractor_for
@@ -480,12 +560,13 @@ src/slipguard/
     taxid.py              python-stdnum GSTIN (IN) + EU VAT, abstains if unsupported
     datesanity.py         future / implausibly-old dates (today injectable)
     duplicate.py          exact + fuzzy resubmission match; prime()-d with history
-    pdfmeta.py            PDF provenance signal (byte inspect_pdf + pikepdf inspect_pdf_deep; use_deep knob); PDF route only
-    imagemeta.py          image EXIF provenance signal (reads forensics.inspect_image); IMAGE route only
+    pdfmeta.py            PDF provenance signal (byte inspect_pdf + pikepdf inspect_pdf_deep; use_deep knob): incremental updates + /Prev content-edit localization + signature edit-after-signing + editor/date + structural anomalies; disjoint accounting; PDF route only
+    imagemeta.py          image provenance signal: C2PA Content Credentials (AI-generation) + EXIF editor/date (forensics.c2pa + forensics.image); abstains only when neither present; IMAGE route only
     __init__.py           default_detectors() — the canonical ranked set
   forensics/
-    pdf.py                PDF provenance — L1 dependency-free bytes (%%EOF / editor / date gap) + L2 pikepdf deep (compressed/XMP metadata + AcroForm/JS/OpenAction/overlay; optional [pdf-forensics])
+    pdf.py                PDF provenance — L1 dependency-free bytes (%%EOF / editor / date gap + /Prev object-diff content-edit localization + signature /ByteRange coverage) + L2 pikepdf deep (compressed/XMP metadata + AcroForm[signature-only exempt]/JS/OpenAction/overlay; optional [pdf-forensics])
     image.py              image EXIF provenance inspector (Pillow; editor tag / capture-vs-modify gap)
+    c2pa.py               C2PA / Content Credentials reader (optional [c2pa], MIT/Apache): classifies manifest digitalSourceType → AI-generated / camera / unknown; lazy c2pa-python; abstains on no manifest
   data/
     synth.py              synthetic structured clean+fraud generator (benchmark backbone)
     pdfsynth.py           synthetic PDF generators: build_pdf (provenance, 3 byte-layer tampers) + build_text_pdf/generate_pdf_extraction (born-digital field corpus, the eval-pdf-extract oracle) + build_compressed_pdf/generate_pdf_deep (pikepdf-minted compressed corpus for the deep forensics layer)
@@ -500,7 +581,7 @@ src/slipguard/
     extraction.py         evaluate_extractors() -> field-accuracy leaderboard vs an oracle, IMAGE (WildReceipt) + PDF (synthetic) routes (eval-extract / eval-pdf-extract)
     calibration.py        summarize_calibration() -> does per-value confidence predict a misread? AUC + reliability bins + abstain sweep (eval-calibration)
     fusion_bench.py       compare_fusion() -> learned logistic fuser vs noisy-OR: leakage-free split, synth-vs-real-legit AUC + real FP at matched recall + legible weights (eval-fusion)
-tests/                    198 tests: detectors, synth invariants, harness, pdf + image forensics, loader, FP audit (+ image_bearing apples-to-apples), extraction + extraction-eval, money parser (incl. the `Rp.`-prefix 1000× regression CORD exposed), VLM parse-completeness + token-logprob scalar confidence (incremental token→char spans, min-over-digits, guard-arming) + docTR OCR-confidence guards, shared KIE/date/money units + row-merge (split two-column recovery), confidence calibration (roc_auc separation, reliability bins, threshold sweep, oracle-pairing), pdf_text (pypdfium2 rect→Line geometry, PDF-route binding, synthetic renderer, real born-digital round-trip), deep PDF forensics (compressed blind-spot recovery, JS/OpenAction/AcroForm/overlay structural flags, the use_deep knob, byte-vs-deep harness contrast — skip-gated on [pdf-forensics]), CORD oracle mapping (qty/line-amount/discount-netting/sub-flatten/locale, pure on hand-built dicts), ExpressExpense glob (recursive, sorted, images-only, limit, fetch-hint on missing dir), learned fusion (feature-vector ordering by detector name + abstain→0, logistic separates separable data, deterministic fit, the noisy-detector-down-weight mechanism, pluggable-combiner override + clamp + noisy-OR-unchanged guard, .explain magnitude-sort) + fusion-bench smoke (synthetic-only run, real columns→n/a, provenance detectors flagged inactive)
+tests/                    224 tests: detectors, synth invariants, harness, pdf + image forensics (incl. /Prev content-edit, signature coverage, content-stream overlay), C2PA classify, loader, FP audit (+ image_bearing apples-to-apples), extraction + extraction-eval, money parser (incl. the `Rp.`-prefix 1000× regression CORD exposed), VLM parse-completeness + token-logprob scalar confidence (incremental token→char spans, min-over-digits, guard-arming) + docTR OCR-confidence guards, shared KIE/date/money units + row-merge (split two-column recovery), confidence calibration (roc_auc separation, reliability bins, threshold sweep, oracle-pairing), pdf_text (pypdfium2 rect→Line geometry, PDF-route binding, synthetic renderer, real born-digital round-trip), deep PDF forensics (compressed blind-spot recovery, JS/OpenAction/AcroForm/overlay structural flags, the use_deep knob, byte-vs-deep harness contrast — skip-gated on [pdf-forensics]), CORD oracle mapping (qty/line-amount/discount-netting/sub-flatten/locale, pure on hand-built dicts), ExpressExpense glob (recursive, sorted, images-only, limit, fetch-hint on missing dir), learned fusion (feature-vector ordering by detector name + abstain→0, logistic separates separable data, deterministic fit, the noisy-detector-down-weight mechanism, pluggable-combiner override + clamp + noisy-OR-unchanged guard, .explain magnitude-sort) + fusion-bench smoke (synthetic-only run, real columns→n/a, provenance detectors flagged inactive)
 ```
 
 ## 7. How to add a new detection approach
@@ -584,9 +665,14 @@ Nothing else changes: fusion and the harness consume any `Detector` uniformly.
   flags — byte→deep recall 0.000→0.833 on a compressed corpus. **Deferred:** text-over-scan
   (collides with legit OCR'd scans → M3 pixel route, not a structural flag); exiftool for richer
   image metadata (maker-notes, thumbnail mismatch) beyond Pillow's core EXIF. Commercial-safe.
-- **M3 — Image route:** AI-generated detector (CLIP/ViT, diversity-trained) +
-  tamper-localization, as **calibrated weak signals**, evaluated honestly under
-  recompression/screenshot laundering.
+- **M3 — Image route:** **lightweight provenance forensics landed** — C2PA / Content
+  Credentials reading (#76) folded into `image_meta` (a signed AI-generation assertion is the
+  one *trustworthy positive*). **Heavy pixel-AI detection stays deferred (#60):** a current
+  survey confirms naive FFT AI-detection collapses under recompression, ELA is FP-prone, and
+  PRNU needs a per-camera reference we never have for inbound receipts — so any pixel detector,
+  if ever added, is a **calibrated weak signal**, never the gate. Remaining lightweight image
+  signals queued: JPEG quant-table fingerprinting (#74, needs real reference data), EXIF
+  thumbnail-vs-full mismatch (#75).
 - **M3 — Real data + learned fusion:** *learned fusion done* — `fusion_learned.LearnedFuser`
   (a transparent logistic over the same per-detector signals) is measured to cut real-corpus FP
   **0.175→0.042 at matched fraud-recall** (`eval-fusion`), by down-weighting the noisy `arithmetic`

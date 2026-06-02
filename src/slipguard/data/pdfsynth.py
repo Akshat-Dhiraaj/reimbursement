@@ -82,31 +82,135 @@ def _assemble_pdf(objs: list[tuple[int, str]], *, info_num: int) -> tuple[str, i
     return out, size, startxref
 
 
-def build_pdf(info: dict[str, str], *, incremental: Optional[dict[str, str]] = None) -> bytes:
+def _content_obj(text: str = "Receipt") -> str:
+    """Page content-stream object (object 4 in :func:`build_pdf`) that prints ``text``.
+    Factored out so an incremental revision can rewrite it with a *different* value — the
+    way a fraudster patches a displayed amount after issuance — using the same writer."""
+    stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET"
+    return f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream"
+
+
+def _append_revision(out: str, *, obj_num: int, body: str, size: int, prev: int) -> str:
+    """Append one incremental revision that rewrites a single object ``obj_num`` and
+    chains to the previous xref at byte offset ``prev`` via ``/Prev``. Yields a second
+    ``%%EOF`` and a one-object xref subsection naming exactly the changed object — the
+    structure :func:`slipguard.forensics.pdf.inspect_pdf` diffs to tell *what* was edited
+    after issuance (a metadata object vs. the page content stream)."""
+    upd_off = len(out)
+    out += f"{obj_num} 0 obj\n{body}\nendobj\n"
+    new_xref = len(out)
+    out += f"xref\n0 1\n0000000000 65535 f \n{obj_num} 1\n{upd_off:010d} 00000 n \n"
+    out += f"trailer\n<< /Size {size} /Root 1 0 R /Info 5 0 R /Prev {prev} >>\n"
+    out += f"startxref\n{new_xref}\n%%EOF\n"
+    return out
+
+
+def build_pdf(
+    info: dict[str, str],
+    *,
+    incremental: Optional[dict[str, str]] = None,
+    incremental_content: Optional[str] = None,
+) -> bytes:
     """Lay out a minimal one-page PDF whose Info dict is ``info`` (the *provenance*
-    benchmark only needs a valid file carrying metadata, not readable fields). If
-    ``incremental`` is given, append a second revision rewriting the Info object (yields
-    two ``%%EOF`` markers, i.e. one incremental update)."""
-    stream = "BT /F1 12 Tf 72 720 Td (Receipt) Tj ET"
+    benchmark only needs a valid file carrying metadata, not readable fields).
+
+    At most one incremental revision is appended (each yields a second ``%%EOF``, i.e. one
+    incremental update), and they differ by *what* they rewrite — the distinction the
+    ``/Prev`` object-diff localizes:
+
+    * ``incremental``         — rewrites the **Info** object (object 5): a metadata-only edit.
+    * ``incremental_content`` — rewrites the **page content stream** (object 4) with the given
+      text: a *displayed value* patched after issuance, the stronger tamper signal."""
     objs = [
         (1, "<< /Type /Catalog /Pages 2 0 R >>"),
         (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
         (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
             "/Contents 4 0 R /Resources << >> >>"),
-        (4, f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream"),
+        (4, _content_obj()),
         (5, _info_obj(info)),
     ]
     out, size, startxref = _assemble_pdf(objs, info_num=5)
 
     if incremental is not None:
-        prev = startxref
-        upd_off = len(out)
-        out += f"5 0 obj\n{_info_obj(incremental)}\nendobj\n"
-        new_xref = len(out)
-        out += f"xref\n0 1\n0000000000 65535 f \n5 1\n{upd_off:010d} 00000 n \n"
-        out += f"trailer\n<< /Size {size} /Root 1 0 R /Info 5 0 R /Prev {prev} >>\n"
-        out += f"startxref\n{new_xref}\n%%EOF\n"
+        out = _append_revision(out, obj_num=5, body=_info_obj(incremental),
+                               size=size, prev=startxref)
+    if incremental_content is not None:
+        out = _append_revision(out, obj_num=4, body=_content_obj(incremental_content),
+                               size=size, prev=startxref)
 
+    return out.encode("latin-1")
+
+
+#: fixed-width fake signature hex. The forensic signal is whether /ByteRange COVERS the
+#: file, not the cryptography, so the contents are just a stable-length placeholder.
+_SIG_PLACEHOLDER = "0" * 512
+
+
+def build_signed_pdf(info: dict[str, str], *, tamper: bool = False) -> bytes:
+    """Mint a structurally *signed* one-page PDF: an AcroForm signature field whose Sig
+    dict carries a ``/ByteRange`` patched to span the whole file around its ``/Contents``
+    placeholder (a legitimately signed, untampered document). With ``tamper=True`` an
+    incremental revision is appended AFTER the signed range, so those bytes fall outside
+    ``/ByteRange`` — the edit-after-signing tell :func:`slipguard.forensics.pdf.inspect_pdf`
+    reports as ``signature_uncovered_bytes``. We don't compute a real signature; the signal
+    is byte-range coverage, not crypto validity."""
+    sig = ("<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached "
+           "/ByteRange [0 0000000000 0000000000 0000000000] "
+           f"/Contents <{_SIG_PLACEHOLDER}> >>")
+    objs = [
+        (1, "<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),
+        (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            "/Contents 4 0 R /Resources << >> /Annots [7 0 R] >>"),
+        (4, _content_obj()),
+        (5, _info_obj(info)),
+        (6, "<< /Fields [7 0 R] /SigFlags 3 >>"),
+        (7, "<< /FT /Sig /T (Signature1) /Subtype /Widget /Rect [0 0 0 0] /P 3 0 R /V 8 0 R >>"),
+        (8, sig),
+    ]
+    out, size, startxref = _assemble_pdf(objs, info_num=5)
+
+    # Patch /ByteRange to bracket the /Contents placeholder and reach EOF. lt/gt are
+    # computed before the same-length patch, so no offsets shift.
+    lt = out.index("/Contents <") + len("/Contents ")
+    gt = out.index(">", lt) + 1
+    byte_range = f"[0 {lt:010d} {gt:010d} {len(out) - gt:010d}]"
+    out = out.replace("[0 0000000000 0000000000 0000000000]", byte_range, 1)
+
+    if tamper:
+        # append a metadata-rewrite revision after the signed range -> bytes outside
+        # /ByteRange (the signature no longer covers the whole file).
+        out = _append_revision(out, obj_num=5, body=_info_obj(dict(info)),
+                               size=size, prev=startxref)
+    return out.encode("latin-1")
+
+
+def build_overlay_pdf(info: dict[str, str]) -> bytes:
+    """A text PDF whose content stream draws original text, then a WHITE rectangle over a
+    row, then a relabelled value on top — the cover-and-relabel tamper done *in the content
+    stream* (vs. as an annotation). The deep layer's content-overlay interpreter
+    (:func:`slipguard.forensics.pdf._count_content_overlays`) should flag it; a clean text
+    PDF (:func:`build_text_pdf`) draws no rectangle over pre-existing text and does not."""
+    stream = (
+        "BT /F1 11 Tf\n"
+        "1 0 0 1 72 700 Tm (Reliance Fresh) Tj\n"
+        "1 0 0 1 72 600 Tm (Total 100.00) Tj\n"
+        "ET\n"
+        "1 1 1 rg\n"                # white fill
+        "70 595 120 16 re f\n"      # box over the "Total 100.00" row
+        "0 0 0 rg\n"
+        "BT /F1 11 Tf 1 0 0 1 74 598 Tm (Total 900.00) Tj ET"  # relabel on top
+    )
+    objs = [
+        (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+        (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            "/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>"),
+        (4, f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream"),
+        (5, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+        (6, _info_obj(info)),
+    ]
+    out, _size, _startxref = _assemble_pdf(objs, info_num=6)
     return out.encode("latin-1")
 
 
@@ -277,6 +381,28 @@ def generate_pdf(
         # the "edited after issuance" signal (one extra %%EOF), no editor/date flags
         data = build_pdf(info, incremental=dict(info))
         make(True, {FraudType.METADATA}, data, {"mode": "incremental_update"})
+
+    for _ in range(fraud_per_type):
+        issued = _issued_at(rng, today)
+        producer = rng.choice(_LEGIT_PRODUCERS)
+        info = {"Producer": producer, "Creator": producer,
+                "CreationDate": _pdf_date(issued), "ModDate": _pdf_date(issued)}
+        # incremental revision that rewrites the PAGE CONTENT stream (a displayed value),
+        # not the Info dict -> the /Prev object-diff localizes a *content* edit, which is
+        # stronger and more specific than a metadata-only incremental update (legit
+        # incremental updates like signatures don't rewrite the page content).
+        data = build_pdf(info, incremental_content="Total 900.00")
+        make(True, {FraudType.METADATA}, data, {"mode": "content_edit"})
+
+    for _ in range(fraud_per_type):
+        issued = _issued_at(rng, today)
+        producer = rng.choice(_LEGIT_PRODUCERS)
+        info = {"Producer": producer, "Creator": producer,
+                "CreationDate": _pdf_date(issued), "ModDate": _pdf_date(issued)}
+        # a digitally-signed PDF with content appended AFTER the signature's /ByteRange
+        # (edit-after-signing) — the signature no longer covers the whole file.
+        make(True, {FraudType.METADATA}, build_signed_pdf(info, tamper=True),
+             {"mode": "signature_tamper"})
 
     rng.shuffle(samples)
     return Dataset(history=[], samples=samples)

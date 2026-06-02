@@ -286,7 +286,11 @@ def _oracle_truths(args: argparse.Namespace) -> list:
 
 def cmd_eval_extract(args: argparse.Namespace) -> None:
     truths = _oracle_truths(args)
-    candidates = [e for e in image_extractors(args.model) if e.can_handle(DocumentType.IMAGE)]
+    # --extractor scores ONE extractor (e.g. `groq`, to spend API quota only on it); the
+    # default ranks the local IMAGE set (VLM + docTR) head-to-head on the same oracle.
+    pool = ([image_extractor_for_spec(args.extractor)] if args.extractor
+            else image_extractors(args.model))
+    candidates = [e for e in pool if e.can_handle(DocumentType.IMAGE)]
 
     runnable = []
     for ex in candidates:
@@ -346,10 +350,34 @@ def _try_load_legit(corpus: str, split: str) -> list:
         return []
 
 
+def _add_provenance_routes(ds, *, seed: int, tag: str):
+    """Merge synthetic PDF (byte-layer provenance) + image (EXIF) fraud & clean samples
+    into a structured Dataset, so the learned fuser sees provenance-bearing rows and
+    pdf_meta/image_meta earn informative weights instead of the structured-only zero (the
+    'route-specific fuser' gap #77 closes). pdf_meta/image_meta gate by document type, so
+    they fire only on their own route's samples and abstain on the structured ones."""
+    from pathlib import Path
+
+    from .data.synth import Dataset
+    from .forensics.image import pillow_available
+    workdir = Path("artifacts") / f"fusion_routes_{tag}"
+    samples = list(ds.samples)
+    samples += generate_pdf(seed=seed, workdir=workdir / "pdf").samples
+    if pillow_available():
+        samples += generate_image(seed=seed, workdir=workdir / "img").samples
+    else:
+        print("(multiroute: image route skipped — Pillow not installed, the [vlm] extra)")
+    return Dataset(history=ds.history, samples=samples)
+
+
 def cmd_eval_fusion(args: argparse.Namespace) -> None:
     # Two independent synthetic seeds -> disjoint train/test fraud with no leakage.
     train = generate(seed=args.seed)
     test = generate(seed=args.seed + 1)
+    if args.multiroute:
+        # add PDF + image provenance fraud so pdf_meta/image_meta aren't trained at zero
+        train = _add_provenance_routes(train, seed=args.seed, tag="train")
+        test = _add_provenance_routes(test, seed=args.seed + 1, tag="test")
 
     real: list = []
     used: list[str] = []
@@ -450,6 +478,9 @@ def build_parser() -> argparse.ArgumentParser:
     px.add_argument("--limit", type=int, default=None,
                     help="score only the first N receipts (a slow VLM on a laptop)")
     px.add_argument("--model", default=None, help="override the VLM checkpoint id")
+    px.add_argument("--extractor", default=None,
+                    help="score ONE extractor (vlm | doctr | groq | groq:<model> | <hf-id>) "
+                         "instead of ranking the local set — e.g. groq, to spend API quota only on it")
     px.set_defaults(func=cmd_eval_extract)
 
     pxp = sub.add_parser("eval-pdf-extract",
@@ -482,6 +513,9 @@ def build_parser() -> argparse.ArgumentParser:
     pfu.add_argument("--split", default="test", choices=_SPLIT_CHOICES)
     pfu.add_argument("--seed", type=int, default=0,
                      help="synthetic seed; the test set uses seed+1 (disjoint, no leakage)")
+    pfu.add_argument("--multiroute", action="store_true",
+                     help="merge synthetic PDF + image provenance fraud into training so the "
+                          "fuser learns pdf_meta/image_meta weights (not the structured-only zero)")
     pfu.set_defaults(func=cmd_eval_fusion)
 
     ps = sub.add_parser("score", help="score a single receipt JSON")
