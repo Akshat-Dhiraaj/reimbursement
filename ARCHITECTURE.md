@@ -32,7 +32,7 @@ flowchart TD
     end
     D --> DET
 
-    DET --> F[Fuser<br/>noisy-OR risk + decision]
+    DET --> F[Fuser<br/>noisy-OR risk default / learned combiner opt-in + decision]
     F --> V[Verdict<br/>risk_score, APPROVE/REVIEW/REJECT, reasons]
 
     DET -. offline .-> H[eval.harness.evaluate<br/>ranks detectors on a labelled set]
@@ -195,9 +195,21 @@ risk = 1 − Π (1 − weightedᵢ)      # skipping abstained signals
 Independent fraud signals compound; abstainers (weighted 0) can't move it. The
 formula itself lives once in `combine.noisy_or` and is reused by `pdf_meta` and
 `image_meta` to combine their own provenance sub-signals — same rule, two levels.
-Thresholds: `risk ≥ 0.85 → REJECT`, `risk ≥ 0.4 → REVIEW`, else `APPROVE`.
-Deliberately simple and **replaceable by a learned/calibrated fuser** once the
-harness gives us measured per-detector performance to fit on (see ROADMAP).
+Thresholds: `risk ≥ 0.85 → REJECT`, `risk ≥ 0.4 → REVIEW`, else `APPROVE`. It needs
+no training, so it is the **default**.
+
+**Learned fuser (`fusion_learned.py`, opt-in).** `Fuser` takes an optional
+`combiner` callable; when set it replaces the noisy-OR rule while `decide` / `verdict`
+/ thresholds stay shared (only the score combination differs). `LearnedFuser` is a
+transparent, dependency-free **logistic regression** over the *same* per-detector
+weighted signals (one feature per detector = `signal.weighted`, keyed by detector
+name; an abstainer contributes 0) — i.e. noisy-OR's inputs with *learned* per-detector
+weights instead of an implicit equal one. It exposes `.explain()` (the legible
+weights) and is selected by measured numbers (`eval-fusion`), not preference; see
+§2.8 and ROADMAP. Honesty: it trains on synthetic positives, so it separates
+synthetic-fraud from real-legitimate receipts, and a detector absent from the
+training data (e.g. `pdf_meta` on structured data) gets an uninformative weight — so
+the learned fuser is route-specific and noisy-OR remains the safe default.
 
 ### 2.8 Evaluation — `eval/`
 - `metrics.py` — dependency-free precision / recall / F1 / ROC-AUC / FPR.
@@ -224,6 +236,16 @@ harness gives us measured per-detector performance to fit on (see ROADMAP).
   `data/pdfsynth.generate_pdf_extraction` renders **known** Receipts to real born-digital text
   PDFs, so the ground truth is exact (not human-annotated) and a perfect read should score ~1.0.
   Backs `slipguard eval-pdf-extract`; measured **macro 0.992** (the one gap is vendor — §2.2.1).
+- `fusion_bench.py` — `compare_fusion()` measures the learned fuser (§2.7) against
+  noisy-OR with **no leakage**: it fits on synthetic seed 0 + the first half of the real
+  corpora and scores on synthetic seed 1 + the held-out half, treating **synthetic fraud as
+  positives and real-legitimate receipts as the negatives** (the FP population the audit
+  cares about). It reports the synth-fraud-vs-real-legit separation (AUC), the **real FP at a
+  matched synthetic fraud-recall**, and the legible learned weights, and flags any detector
+  that never fired in training. `date_sanity` is pinned to the corpus era for the real batch
+  (the same control as `eval-real --today`). Backs `slipguard eval-fusion`; **measured real FP
+  0.175 → 0.042 (~4×) at matched recall, AUC 0.867 → 0.990** — by down-weighting the noisy
+  `arithmetic` signal (legible weights). **This is the fuser selector**, mirroring `harness.py`.
 
 ### 2.9 Forensics — `forensics/pdf.py`, `forensics/image.py`
 PDF provenance is **two layers, by design**, so the cheap path needs no dependency and
@@ -268,8 +290,9 @@ src/slipguard/
   routing.py              route_path / route_bytes -> DocumentType
   combine.py              noisy_or(): the shared probability-combination rule
   money.py                parse_money(): shared US/EU-aware money parser (oracle + VLM extractor)
-  fusion.py               Fuser: noisy-OR risk + APPROVE/REVIEW/REJECT
-  cli.py / __main__.py    eval | eval-pdf | eval-pdf-forensics | eval-image | eval-real --corpus … | eval-extract | eval-pdf-extract | eval-calibration | score
+  fusion.py               Fuser: noisy-OR risk (default) or a pluggable learned combiner -> APPROVE/REVIEW/REJECT
+  fusion_learned.py       LearnedFuser: dependency-free logistic over the same per-detector signals; .fit / .explain
+  cli.py / __main__.py    eval | eval-pdf | eval-pdf-forensics | eval-image | eval-real --corpus … | eval-extract | eval-pdf-extract | eval-calibration | eval-fusion | score
   extractors/
     base.py               Extractor ABC (handles / can_handle / extract -> Receipt; available())
     kie.py                shared keyword/position KIE: Line(text,y,conf,x) -> receipt_from_lines() (docTR + PDF)
@@ -303,7 +326,8 @@ src/slipguard/
     audit.py              audit_false_positives() -> FP report on a legitimate corpus (any of the 3 via --corpus)
     extraction.py         evaluate_extractors() -> field-accuracy leaderboard vs oracle
     calibration.py        summarize_calibration() -> does per-value confidence predict a misread?
-tests/                    187 tests
+    fusion_bench.py       compare_fusion() -> learned logistic fuser vs noisy-OR (real FP at matched recall; the fuser selector)
+tests/                    198 tests
 ```
 
 ---

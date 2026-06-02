@@ -44,15 +44,16 @@ never the gate**.
 | Layer | Status | Evidence |
 |---|---|---|
 | Domain models + pluggable detector framework | ✅ Done | `models.py`, `detectors/base.py` |
-| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 187 tests; synthetic leaderboard |
+| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 198 tests; synthetic leaderboard |
 | Noisy-OR fusion + eval harness + CLI | ✅ Done | `slipguard eval` |
+| **Learned logistic fusion** (opt-in; same signals, learned weights) | ✅ Done (measured: real FP **0.175→0.042** at matched recall) | `slipguard eval-fusion` |
 | PDF provenance forensics (`pdf_meta`) | ✅ Done (byte scan **+ pikepdf deep layer**) | `slipguard eval-pdf` · `eval-pdf-forensics` |
 | Image-EXIF provenance forensics (`image_meta`) | ✅ Done (EXIF only) | `slipguard eval-image` |
 | Real-data false-positive audit | ✅ Done (**3 corpora**: WildReceipt, CORD, ExpressExpense) | `slipguard eval-real --corpus …` |
 | **IMAGE-route extraction (photo → fields, OCR/VLM)** | 🔶 **Two extractors benchmarked head-to-head: VLM (Qwen2-VL-2B) leads, docTR OCR+KIE second** | `slipguard eval-extract` → macro **VLM 0.725 / docTR 0.579** |
 | **PDF-route extraction (born-digital → fields)** | ✅ **Done — PDFs now score end-to-end (was provenance-only)** | `slipguard eval-pdf-extract` → macro **0.992** (pypdfium2) |
 | Image *pixel* forensics (AI-generated, tamper-localization) | ❌ Not started | declared in label space only |
-| Real fraud corpora + learned fusion | ❌ Not started | data gap (see DECISIONS) |
+| Real *fraud* corpora (positives) | ❌ Not started | data gap — real receipt sets are legitimate-only (see DECISIONS) |
 
 **Honest caveat:** the synthetic benchmark scores ~1.0 AUC, but that only validates
 the *harness and detector logic* on fraud that violates these exact rules. It says
@@ -69,7 +70,7 @@ pip install -e ".[dev]"
 #   pip install -e ".[pdf]"   # pypdfium2 born-digital PDF text extractor (Apache/BSD) — light, CPU-only
 #   pip install -e ".[pdf-forensics]"  # pikepdf deep PDF provenance/structure layer (MPL-2.0) — light, CPU-only
 
-python -m pytest                  # 187 tests
+python -m pytest                  # 198 tests
 slipguard eval                    # synthetic structured benchmark leaderboard
 slipguard eval-pdf                # synthetic PDF-provenance leaderboard
 slipguard eval-pdf-forensics      # compressed-PDF deep forensics: byte-only vs pikepdf recall (needs [pdf-forensics])
@@ -78,6 +79,7 @@ slipguard eval-real --corpus cord # real-receipt FP audit; --corpus {wildreceipt
 slipguard eval-extract            # rank IMAGE extractors (docTR vs VLM) on field accuracy vs the oracle (--corpus wildreceipt|cord)
 slipguard eval-pdf-extract        # rank PDF extractor(s) on field accuracy vs a synthetic oracle (needs [pdf])
 slipguard eval-calibration        # does an extractor's per-value confidence predict a misread? (needs [vlm])
+slipguard eval-fusion             # learned logistic fuser vs noisy-OR: real FP at matched recall + legible weights
 slipguard score data/demo.json    # score one structured receipt JSON
 
 # Real corpora for eval-real (none committed; all commercial-safe):
@@ -171,6 +173,20 @@ tar -xf datasets/wildreceipt.tar -C datasets
   dropped-correct reads (T=0.7 catches 51% of misreads but drops 17% of good ones), and the
   arithmetic-breaking misreads skew confident. → *a measured, genuinely useful calibrated
   per-value feature for cost-aware learned fusion (M3) — not a standalone unsupervised gate.*
+- **Learned fusion vs noisy-OR — the FP lever, measured (2026-06):** `eval-fusion` fits a
+  transparent, dependency-free **logistic fuser** over the *same* per-detector confidence-weighted
+  signals noisy-OR uses (one feature per detector — learned weights instead of an implicit equal
+  weight), on **synthetic fraud (positives) + synthetic-clean & real-legitimate WildReceipt+CORD
+  (negatives)**, then scores it on a **disjoint** split (different synthetic seed; the real corpora
+  split into two halves — no receipt is both trained and scored). Result: synth-fraud-vs-**real-legit**
+  separation **AUC 0.867 → 0.990**, and **real-corpus false positives drop 0.175 → 0.042 (~4×) at a
+  matched synthetic fraud-recall**. The legible weights say *why*: `tax_id +6.79`, `duplicate +6.27`,
+  `date_sanity +5.11` earn the trust while the **noisy `arithmetic` signal is down-weighted to
+  +2.66** — the exact lever the audit named. → *Honest caveats: positives are **synthetic**, so this
+  measures synth-fraud-vs-real-legit separation, **not real-fraud detection**; and `pdf_meta` /
+  `image_meta` learn weight 0 (no provenance examples in this structured training data), so the fuser
+  is route-specific and **noisy-OR stays the zero-training default** — learned is opt-in, picked by
+  these numbers. (Reproduce: `slipguard eval-fusion`.)*
 - **PDF-route extraction — born-digital PDFs now score end-to-end (2026-06):** until now a
   PDF got **provenance forensics only**; nothing read its fields, so `arithmetic` /
   `date_sanity` / `duplicate` **abstained on every PDF** (a born-digital invoice with edited
@@ -192,14 +208,16 @@ src/slipguard/
   models.py        domain models + Signal/Verdict (the shared contracts)
   routing.py       classify raw input -> PDF | IMAGE | STRUCTURED
   combine.py       noisy_or(): the shared probability-combination rule
+  fusion.py        Fuser: noisy-OR risk (default) or a pluggable learned combiner -> Decision
+  fusion_learned.py LearnedFuser: dependency-free logistic over the same signals; .fit / .explain
   money.py         parse_money(): shared US/EU-aware money parser (oracle + VLM extractor)
   extractors/      one file per extraction approach (Structured, Qwen2-VL, docTR-OCR, PDF-text) + the shared KIE (kie.py) + ABC + registry
   detectors/       one file per detection method + the Detector ABC + registry
   forensics/       provenance inspectors: PDF (dependency-free bytes + optional pikepdf deep layer) + image EXIF (Pillow)
   data/            synthetic generators (images + born-digital PDFs + compressed deep-forensics PDFs) + real-corpus loaders (WildReceipt, CORD, ExpressExpense)
-  eval/            metrics, ranking harness, false-positive audit, extraction-accuracy + confidence-calibration benchmarks
-  cli.py           `slipguard eval | eval-pdf | eval-pdf-forensics | eval-image | eval-real --corpus … | eval-extract | eval-pdf-extract | eval-calibration | score`
-tests/             187 tests
+  eval/            metrics, ranking harness, false-positive audit, extraction-accuracy + confidence-calibration + learned-fusion benchmarks
+  cli.py           `slipguard eval | eval-pdf | eval-pdf-forensics | eval-image | eval-real --corpus … | eval-extract | eval-pdf-extract | eval-calibration | eval-fusion | score`
+tests/             198 tests
 ```
 
 ## 7. Licence posture (summary)

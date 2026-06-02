@@ -1,6 +1,6 @@
 # Roadmap — done, in progress, and the plan for what's left
 
-Status as of 2026-06-01. Rationale for the choices below lives in
+Status as of 2026-06-02. Rationale for the choices below lives in
 [DECISIONS.md](DECISIONS.md); the mechanics in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
@@ -12,7 +12,7 @@ Status as of 2026-06-01. Rationale for the choices below lives in
 | **M1** | Deterministic layer + synthetic benchmark + harness + fusion + CLI | ✅ **Done** |
 | **M2** | Provenance route: PDF + image-EXIF forensics + real-data FP audit (**3 corpora**) | ✅ **Done** (byte parse **+ pikepdf deep layer** for compressed PDFs; exiftool deferred) |
 | **M2.5** | **Faithful extraction route (OCR/VLM/PDF): photo/PDF → fields** | 🔶 **In progress** — IMAGE: VLM (Qwen2-VL-2B, macro 0.725) leads docTR OCR+KIE (0.579) head-to-head; **PDF: born-digital text route landed (macro 0.992)** so PDFs now score end-to-end; scalar-misread confidence calibrated (AUC 0.758) for the M3 fuser |
-| **M3** | Image forensics route + real fraud corpora + learned fusion | ❌ Planned |
+| **M3** | Image *pixel* forensics route + real fraud corpora + learned fusion | 🔶 **Learned fusion done** (opt-in logistic fuser, real-corpus FP **0.175 → 0.042**; #60 pixel route + real *fraud* positives still planned) |
 
 ---
 
@@ -80,8 +80,37 @@ Status as of 2026-06-01. Rationale for the choices below lives in
 - Evidence: image benchmark (70 samples) — `image_meta` AUC 1.0 / recall 1.0 / 0 FP
   over 30 EXIF-provenance tampers (editor tag + capture/modify gap); the structured
   detectors and `pdf_meta` correctly abstain on the IMAGE route.
-- **187 tests pass** (full suite, all milestones; +12 real-corpora: CORD oracle mapping +
-  ExpressExpense glob + the `Rp.`-prefix money regression).
+- **198 tests pass** (full suite, all milestones; +11 since #61 for learned fusion — 10 in
+  `tests/test_fusion_learned.py` covering the logistic fit, the pluggable combiner, and the
+  down-weights-a-noisy-detector contract, + a leakage-free `compare_fusion` smoke).
+
+**M3 (partial) — learned fusion (opt-in, measured).**
+- `fusion_learned.py` (`LearnedFuser`): a **dependency-free, hand-rolled logistic regression**
+  `σ(w·x + b)` over the **same per-detector confidence-weighted signals noisy-OR already
+  consumes** (one feature per detector = `signal.weighted`, keyed by name; abstainer → 0) — so it
+  is noisy-OR's inputs with *learned* per-detector weights instead of an implicit equal one
+  (apples-to-apples, interpretable). Full-batch GD, class-balanced log-loss + L2, **deterministic**
+  (zero init, no RNG); `.explain()` sorts weights by magnitude. Wired in through a pluggable
+  `Fuser.combiner`: `None` → noisy-OR (**byte-identical default**, test-guarded), set → learned
+  (clamped [0, 1]); `decide`/`verdict`/thresholds stay shared.
+- **Leakage-free measurement** (`eval/fusion_bench.py`, `slipguard eval-fusion`): fit on synth seed
+  0 + first half of the real corpora, score on synth seed 1 + held-out half; positives = synthetic
+  fraud, negatives = synth-clean + real-legitimate (WildReceipt + CORD). FP reported at a **matched
+  synthetic fraud-recall** (each fuser picks its own threshold to hit the same recall) + threshold-
+  free AUC + legible weights + an `inactive` list (features all-zero in training). date_sanity pinned
+  to corpus era for the real batch.
+- Evidence (reproduce: `slipguard eval-fusion`): real-corpus FP **0.175 → 0.042 (~4×)** at matched
+  fraud-recall; synth-fraud-vs-real-legit AUC **0.867 → 0.990**; synth-vs-synth-clean 1.000 → 0.996.
+  Weights **tax_id +6.785 / duplicate +6.271 / date_sanity +5.108 / arithmetic +2.664 /
+  pdf_meta +0.000 / image_meta +0.000**, bias −2.914 (120 synth-fraud + 120 synth-clean + 286
+  real-legit each side). **The 4× FP cut is the lever both FP audits named:** the fuser learns to
+  **down-weight the noisy `arithmetic`** signal relative to the high-precision structural detectors.
+- **Two loud honest caveats:** (1) positives are **synthetic**, so this measures synth-fraud-vs-
+  real-legit *separation*, not real-fraud detection; (2) pdf_meta/image_meta land at weight **0.000**
+  only because the structured/KIE training batch has **no provenance examples**, so the learned fuser
+  is **route-specific** — which is why **noisy-OR stays the zero-training default** and the learned
+  fuser is **opt-in** (the `inactive` annotation keeps the silent zero honest: "never fired in
+  training", not "judged useless").
 
 ---
 
@@ -201,18 +230,24 @@ tamper-localizer, added as `applies_to=(IMAGE,)` detectors. Per
 honestly under screenshot/JPEG laundering and fused as low-weight inputs.
 
 ### M3 — real fraud corpora + learned fusion
-**Done (legitimate FP-audit corpora):** three real *legitimate* corpora are now wired for the
+**Done — learned fusion (#62):** the opt-in logistic fuser landed and is measured (see the Done
+section: real-corpus FP **0.175 → 0.042**, AUC **0.867 → 0.990**, by down-weighting noisy
+`arithmetic`). It already weighs the per-detector confidence-weighted signals; the AUC-0.758 scalar
+confidence and PDF structural signal slot in as additional features once there are real-fraud
+positives to train against.
+**Done — legitimate FP-audit corpora:** three real *legitimate* corpora are wired for the
 false-positive audit — WildReceipt, CORD, ExpressExpense (see the M2 entry). These measure FP
-cost, not fraud recall (every receipt is genuine). What remains here is real *fraud* data + the
-fuser:
-**Plan:** (a) pursue written permission for *Find it again!* (the only public real-forgery set)
-and onboard IQline HR-provided receipts (proprietary, never committed) as real in-domain fraud
-data; (b) once the harness has measured per-detector performance on real data, replace noisy-OR
-with a **calibrated/learned fuser** (#62) fit on those numbers — its first measured inputs already
-exist: the VLM's per-value confidence (AUC 0.758), the PDF *structural* signal, and the two
-real-corpora FP findings (WildReceipt extraction-lossiness + CORD model-narrowness) that both point
-at **representation completeness**, including a concrete richer-Receipt-model target (service-charge
-/ discount / tax-inclusive fields) that CORD surfaced.
+cost, not fraud recall (every receipt is genuine).
+**What remains:** (a) **real *fraud* positives** — pursue written permission for *Find it again!*
+(the only public real-forgery set) and onboard IQline HR-provided receipts (proprietary, never
+committed) — to replace the **synthetic** positives the fuser is currently fit on (today's headline
+measures synth-fraud-vs-real-legit *separation*, not real-fraud detection); (b) **route-appropriate
+fuser training** so the learned fuser stops being structured-route-specific — train per-route
+batches that actually exercise `pdf_meta`/`image_meta`, so their weights become informative instead
+of the honest **0.000** they sit at today (which is why noisy-OR stays the zero-training default);
+(c) a **richer `Receipt` model** (service-charge / discount / tax-inclusive fields) — the concrete
+data-model target CORD surfaced and the biggest remaining FP lever, since it gives `arithmetic` a
+cleaner signal that even a reweighting fuser can't recover.
 
 ---
 
@@ -234,6 +269,15 @@ at **representation completeness**, including a concrete richer-Receipt-model ta
   reliability** — so the 0.5 floor was too low, not the signal useless. There is no free-lunch
   threshold (every cut trades misread-recall for dropped-correct reads), so it earns its keep as
   a **calibrated per-value feature for the cost-aware learned fuser (M3)**, not a hand-set floor.
+- **The learned fuser is opt-in and route-specific — measured on *synthetic* positives.** It cuts
+  real-corpus FP **0.175 → 0.042** by down-weighting noisy `arithmetic`, but two honest limits keep
+  it from being the default: (1) it is fit on **synthetic** fraud, so the headline measures synth-
+  fraud-vs-real-legit *separation*, **not** real-fraud detection (it needs real fraud positives to
+  become a true detection number); (2) `pdf_meta`/`image_meta` learn weight **0.000** purely because
+  the structured/KIE training batch has **no provenance examples** — a route artifact, not a verdict
+  that those detectors are useless (the `eval-fusion` `inactive` annotation says so). So **noisy-OR
+  stays the zero-training default** and the learned fuser is opt-in until route-appropriate training
+  + real-fraud positives exist.
 - **The `Receipt` model is 3-field (subtotal / tax / total) — a measured FP source, not a bug.**
   CORD's clean-oracle FP audit (0.170, all `arithmetic`) isolated this: a genuine receipt whose
   total carries a **service charge / discount**, or whose menu prices are **tax-inclusive**, fails

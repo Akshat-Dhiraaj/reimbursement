@@ -44,13 +44,29 @@ fusion.
 adding noise (a US receipt has no GSTIN; a photo has no PDF structure). Abstention
 keeps the risk score driven only by detectors that actually apply.
 
-### 1.5 Noisy-OR fusion now, learned fusion later
-**Decision:** start with confidence-weighted noisy-OR; defer a learned/calibrated
-fuser.
-**Why:** noisy-OR is transparent, needs no training data, and is a sensible prior
-(independent fraud signals compound). A learned fuser only earns its keep once the
-harness has produced enough labelled per-detector performance to fit on — otherwise
-we'd be fitting noise. **Plan:** replace it in M3 (see [ROADMAP.md](ROADMAP.md)).
+### 1.5 Noisy-OR is the default; a learned fuser is opt-in and measured (done)
+**Decision:** keep confidence-weighted noisy-OR as the zero-training **default**, and add a
+transparent **learned logistic fuser** as an opt-in `combiner` — selected by measured numbers,
+not by replacing noisy-OR wholesale.
+**Why noisy-OR stays default:** it is transparent, needs no training data, and is a sensible
+prior (independent fraud signals compound) — and it works on every route with no per-route data.
+**Why a learned fuser earns its keep (now that we have the data):** the FP audit showed the
+binding real-world cost is a *noisy* `arithmetic` signal that fires on lossy/edge-case
+extractions of legitimate receipts, while the structural detectors are high-precision; noisy-OR
+weights all six equally. `fusion_learned.LearnedFuser` is a logistic regression over the **same**
+per-detector weighted signals (so it's noisy-OR's inputs with *learned* weights, and its weights
+are inspectable via `.explain()`). **Measured** (`eval-fusion`, leakage-free split): it cuts the
+real-corpus FP **0.175 → 0.042 (~4×) at a matched synthetic fraud-recall** and lifts
+synth-fraud-vs-real-legit separation **AUC 0.867 → 0.990**, by down-weighting `arithmetic` (+2.66)
+relative to `tax_id`/`duplicate`/`date_sanity` (+5 to +6.8) — exactly the lever the audit named.
+**Why it is opt-in, not the new default (honest limits):** (1) it trains on **synthetic**
+positives, so it separates *synthetic-fraud from real-legitimate* receipts, not real fraud; (2) a
+detector absent from the training data (`pdf_meta`/`image_meta` on structured/KIE receipts) learns
+weight 0, so the fitted model is **route-specific** — using it on the PDF/image routes needs
+provenance-bearing training. So the learned fuser is the *measured-better* choice on the
+structured/KIE route, while noisy-OR remains the safe cross-route default. **Next (see
+[ROADMAP.md](ROADMAP.md)):** real-fraud positives + route-appropriate training, and the richer
+`Receipt` model (the complementary, bigger FP lever from §3 CORD).
 
 ### 1.6 Extraction is a pluggable, separately-evaluated approach (like detectors)
 **Decision:** the OCR/VLM extractor is not hard-wired — it implements an `Extractor`
@@ -118,8 +134,8 @@ and a bespoke PDF field parser (would duplicate the KIE logic that OCR already n
 | **Text-over-scan flag** (a text layer sitting atop a scanned page image) | ❌ **Deferred** (not a structural flag) | Tempting as a "retyped over the scan" tamper signal, but it **collides with legitimate OCR'd / searchable scans** (every "Scan to searchable PDF" output is text-over-image) → unacceptable false positives as a hard structural flag. The honest home for it is the M3 pixel/layout route as a *calibrated weak* signal, not the provenance layer. Skipped deliberately, with the reason recorded. |
 | **pypdfium2** (born-digital PDF *text-layer* read for the PDF extraction route) | ✅ **In use** | **Apache-2.0 / BSD-3-Clause** (bundles Google's PDFium, BSD-3-Clause) — fully commercial-safe, CPU-only, light. Returns per-line text rects + page geometry, which map cleanly into the shared KIE's `Line` contract. Kept an optional `[pdf]` extra so the core install stays dependency-free; the extractor reports it missing via `available()`. First measured result: round-trip **macro 0.992** on minted text PDFs. |
 | **PyMuPDF / fitz** (the popular PDF text/render lib) | ❌ **Avoided** | **AGPL-3.0** (or a paid commercial licence) — copyleft that would reach a shipping internal product. pypdfium2 gives the text-layer read we need under a permissive licence, so the AGPL risk is simply unnecessary. |
-| **Noisy-OR fusion** | ✅ Used now | See §1.5. |
-| **Learned/calibrated fuser** | ⏳ Planned (M3) | Needs measured per-detector performance first; premature now. The first calibrated input now exists — the VLM's per-value confidence (AUC 0.758 vs oracle, §1.7) — which is exactly the kind of measured feature the fuser will consume. |
+| **Noisy-OR fusion** | ✅ Default | Zero-training, transparent, cross-route. See §1.5. |
+| **Learned logistic fuser** (`fusion_learned.py`) | ✅ **In use (opt-in, measured)** | A transparent logistic regression over the **same** per-detector weighted signals as noisy-OR (hand-rolled GD, dependency-free, weights inspectable via `.explain()`). Measured by `eval-fusion` on a leakage-free split: real-corpus FP **0.175 → 0.042 (~4×)** at matched synthetic fraud-recall, AUC **0.867 → 0.990**, by down-weighting the noisy `arithmetic` signal. Opt-in (not the default) because it trains on **synthetic** positives (synth-fraud-vs-real-legit separation, not real-fraud detection) and is **route-specific** (provenance detectors learn weight 0 on structured data). See §1.5. |
 | **LayoutLMv3** (document KIE) | ❌ Avoided | Licence **CC-BY-NC** — non-commercial; unusable in a shipping product. |
 | **Surya** (OCR) | ❌ Avoided | **GPL** — copyleft; incompatible with a closed internal product. |
 | **docTR** (OCR + transparent keyword/position KIE) | ✅ **In use** (benchmarked 2nd) | **Apache-2.0**, commercial-safe. Landed as the OCR+KIE counterpoint to the VLM so the IMAGE route is *picked by numbers, not reputation*: two-stage text detection+recognition + a transparent same-row "keyword + money" KIE. On the **same** 100 receipts it scores **macro 0.579 vs the VLM's 0.725 → the VLM ships**, but the field read is the honest part — docTR is **competitive on the arithmetic-driving money fields** (tax 0.600 ≈ VLM 0.614; **total 0.696 > VLM 0.598**) and trails on vendor (0.380) + line_count (0.312). A first naive single-line KIE mis-scored it **0.244**: docTR's OCR read every amount correctly (date ties the VLM at 0.915), but it emits each summary row's *label* and *right-column amount* as **separate** lines, so a same-line rule read `SUBTOTAL`/`TOTAL` as money-less and the stray digit in `TAX1` as `1.0`. A transparent **row-merge** pre-pass (rejoin same-height lines, x-ordered so the amount stays right-most) lifted it **0.244 → 0.579** with no new model. KIE is still English-keyword heuristic (German *Netto/MwSt/Summe* miss). PaddleOCR/PP-Structure remains a future candidate, same contract. |

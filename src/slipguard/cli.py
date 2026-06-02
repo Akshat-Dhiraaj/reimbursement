@@ -48,6 +48,16 @@
       threshold sweep. Tells us if a *calibrated* threshold could recover FP that the
       principled 0.5 floor cannot (feeds the learned-fusion milestone).
 
+  slipguard eval-fusion [--corpora wildreceipt cord] [--split test|train|both]
+                        [--seed S]
+      Measure the LEARNED logistic fuser against the noisy-OR baseline. Fits on
+      synthetic fraud (positives) + synthetic-clean and one half of the real corpora
+      (legitimate negatives), then reports — on a different synthetic seed and the
+      held-out corpus half — the synth-fraud-vs-real-legit separation (AUC) and the
+      real false-positive rate at a matched fraud-recall, plus the legible learned
+      per-detector weights. Honest caveat: positives are synthetic, so this is
+      synth-fraud vs real-legit separation, not real-fraud detection.
+
   slipguard score RECEIPT.json
       Score one receipt (JSON of the Receipt fields) and print the verdict.
 """
@@ -70,6 +80,7 @@ from .detectors.pdfmeta import PdfMetadataDetector
 from .eval.audit import audit_false_positives, image_bearing, reextract
 from .eval.calibration import collect_confidence_rows, summarize_calibration
 from .eval.extraction import evaluate_extractors
+from .eval.fusion_bench import compare_fusion
 from .eval.harness import evaluate
 from .extractors import (
     default_extractors,
@@ -324,6 +335,37 @@ def cmd_eval_calibration(args: argparse.Namespace) -> None:
     print(summarize_calibration(rows, ex.name))
 
 
+def _try_load_legit(corpus: str, split: str) -> list:
+    """Load a real corpus as legitimate negatives for the fusion benchmark, or print
+    why it's unavailable and return an empty list (the bench degrades to synthetic-only
+    rather than hard-failing, so it still runs on a machine missing one corpus)."""
+    try:
+        return _load_corpus(corpus, None, split)
+    except SystemExit as e:  # _load_corpus exits with fetch instructions when absent
+        print(f"(skipping {corpus}: {str(e).splitlines()[0]})")
+        return []
+
+
+def cmd_eval_fusion(args: argparse.Namespace) -> None:
+    # Two independent synthetic seeds -> disjoint train/test fraud with no leakage.
+    train = generate(seed=args.seed)
+    test = generate(seed=args.seed + 1)
+
+    real: list = []
+    used: list[str] = []
+    for corpus in args.corpora:
+        recs = _try_load_legit(corpus, args.split)
+        if recs:
+            real += recs
+            used.append(f"{corpus}({len(recs)})")
+    if not real:
+        print("No real corpora present; fitting on synthetic clean negatives only "
+              "(the real-FP columns will be n/a). Fetch a corpus to measure real FP — "
+              "see `eval-real --help`.\n")
+
+    print(compare_fusion(train, test, real, corpora=used))
+
+
 def cmd_score(args: argparse.Namespace) -> None:
     route = route_path(args.path)
     extractor = extractor_for(route)
@@ -430,6 +472,17 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--limit", type=int, default=None,
                     help="calibrate on the first N receipts (a slow VLM on a laptop)")
     pc.set_defaults(func=cmd_eval_calibration)
+
+    pfu = sub.add_parser("eval-fusion",
+                         help="measure the learned logistic fuser vs the noisy-OR baseline")
+    pfu.add_argument("--corpora", nargs="+", default=["wildreceipt", "cord"],
+                     choices=("wildreceipt", "cord"),
+                     help="real corpora to use as legitimate negatives (default: both; "
+                          "expressexpense excluded — its oracle path has no fields)")
+    pfu.add_argument("--split", default="test", choices=_SPLIT_CHOICES)
+    pfu.add_argument("--seed", type=int, default=0,
+                     help="synthetic seed; the test set uses seed+1 (disjoint, no leakage)")
+    pfu.set_defaults(func=cmd_eval_fusion)
 
     ps = sub.add_parser("score", help="score a single receipt JSON")
     ps.add_argument("path")

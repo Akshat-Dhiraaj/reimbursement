@@ -2,14 +2,16 @@
 
 > Handoff doc for transferring this project to a fresh AI session or engineer.
 > **Keep this file updated every milestone** (status, architecture, roadmap).
-> Last updated: 2026-06-01 (M2 + real-data FP audit; M2.5 extractor interface + confidence
+> Last updated: 2026-06-02 (M2 + real-data FP audit; M2.5 extractor interface + confidence
 > guard + extraction-accuracy benchmark + first real VLM extractor (Qwen2-VL-2B) benchmarked
 > + shared US/EU money parser that fixed an oracle ground-truth bug; image-EXIF provenance
 > forensics on the IMAGE route; PDF-route field extractor (pypdfium2) — born-digital PDFs
 > now score end-to-end through arithmetic/date_sanity/duplicate, not provenance-only;
-> **two more real corpora (CORD CC-BY-4.0 + ExpressExpense MIT) behind a `--corpus`
+> two more real corpora (CORD CC-BY-4.0 + ExpressExpense MIT) behind a `--corpus`
 > selector — CORD's oracle FP audit corroborates the WildReceipt finding on a second,
-> Indonesian-locale corpus**).
+> Indonesian-locale corpus; **learned logistic fusion (#62) measured against noisy-OR —
+> cuts real-corpus false positives 0.175→0.042 at matched fraud-recall by down-weighting the
+> noisy arithmetic signal; noisy-OR stays the zero-training default, learned is opt-in**).
 
 ## 1. What this is
 
@@ -368,6 +370,31 @@ pure-mapping, +4 ExpressExpense glob/scope, +1 `Rp.`-prefix money regression). (
 `slipguard eval-real --corpus cord --limit 100`; CORD downloads on first run via the `[vlm]`
 `datasets` lib.)
 
+**Learned fusion measured vs noisy-OR (#62, done).** `fusion_learned.py` adds a transparent,
+dependency-free **logistic-regression fuser** over the *same* per-detector confidence-weighted
+signals noisy-OR consumes (one feature per detector = `signal.weighted`, by detector name; an
+abstainer's weight is 0, so it's noisy-OR's inputs with *learned* per-detector weights instead of an
+implicit equal weight). `Fuser` gained a pluggable `combiner` (default `None` ⇒ noisy-OR, unchanged);
+`decide`/`verdict`/thresholds are shared, so only the score combination differs. `eval/fusion_bench.py`
+(`eval-fusion`) fits it on **synthetic fraud = positives + synthetic-clean & real-legitimate
+(WildReceipt+CORD) = negatives**, then measures on a *disjoint* split (synthetic seed 0 train / seed 1
+test; the real corpora split into two halves) — no receipt is both trained and scored. **Measured
+(reproduced, `slipguard eval-fusion`):** synth-fraud-vs-**real-legit** separation **AUC 0.867 → 0.990**,
+and the **real-corpus false-positive rate at a matched synthetic fraud-recall drops 0.175 → 0.042
+(~4×)**; the easy synth-fraud-vs-synth-clean case is essentially unchanged (1.000 → 0.996). The
+**legible learned weights** explain *why*: the high-precision structural detectors earn the trust
+(`tax_id +6.79`, `duplicate +6.27`, `date_sanity +5.11`) while the **noisy `arithmetic` signal is
+down-weighted (+2.66)** — exactly the lever the FP audit predicted (arithmetic also fires on lossy
+real extractions, so equal-weight noisy-OR over-counted it). **Honest caveats (loud):** (1) the
+positives are **synthetic** fraud, so this measures *synthetic-fraud vs real-legitimate* separation,
+**not real-fraud detection**; (2) `pdf_meta` / `image_meta` learned **weight 0.0** because the
+structured/KIE training data carries **no PDF/image provenance examples** — so the fuser as fit here
+is calibrated for the **structured/KIE route only** and must NOT replace noisy-OR on the PDF/image
+routes without route-appropriate (provenance-bearing) training. Hence **noisy-OR stays the
+zero-training default; learned fusion is opt-in and selected by these numbers** (and the
+richer-`Receipt`-model work from #61 remains the complementary, bigger lever). **198 tests pass**
+(+11: 10 learned-fuser unit + 1 fusion-bench smoke). (Reproduce: `slipguard eval-fusion`.)
+
 ## 4. Quickstart
 
 ```bash
@@ -379,7 +406,7 @@ pip install -e ".[dev]"          # editable install + pytest
 #   pip install -e ".[pdf]"      # pypdfium2 born-digital PDF text extractor (Apache/BSD) — light, CPU-only
 #   pip install -e ".[pdf-forensics]"  # pikepdf deep PDF provenance/structure layer (MPL-2.0) — light, CPU-only
 
-python -m pytest                 # run tests (187)
+python -m pytest                 # run tests (198)
 slipguard eval                   # structured benchmark leaderboard
 slipguard eval-pdf               # PDF-provenance benchmark leaderboard
 slipguard eval-pdf-forensics     # compressed-PDF deep forensics: byte-only vs pikepdf recall (needs [pdf-forensics])
@@ -387,6 +414,7 @@ slipguard eval-image             # image-EXIF provenance benchmark leaderboard (
 slipguard eval-real --corpus cord   # real-receipt FP audit; --corpus {wildreceipt|cord|expressexpense}
 slipguard eval-extract           # rank IMAGE extractors (docTR vs VLM) on field accuracy vs the oracle (--corpus wildreceipt|cord)
 slipguard eval-pdf-extract       # rank PDF extractor(s) on field accuracy vs a synthetic oracle (needs [pdf])
+slipguard eval-fusion            # measure the learned logistic fuser vs noisy-OR (real-FP at matched recall + legible weights)
 slipguard score data/demo.json   # score one receipt JSON (see data/demo.json)
 
 # Fetch the real corpora for eval-real (not committed; all commercial-safe):
@@ -415,7 +443,7 @@ raw input ──routing.route_path──> DocumentType {PDF | IMAGE | STRUCTURED
         (reconcile) (GSTIN/VAT) (future date)(resubmit) (PDF provenance) (image EXIF prov.)  AI-image, tamper-loc)
         └───────────────────────────── list[Signal] ───────────────────────────────┘
                                         ▼
-                          Fuser.verdict  (noisy-OR risk + Decision)
+             Fuser.verdict  (noisy-OR risk by default, or a learned combiner; + Decision)
                                         ▼
                        Verdict {risk_score, decision, reasons}
 
@@ -435,8 +463,9 @@ src/slipguard/
   routing.py              classify raw input -> DocumentType (PDF/IMAGE/STRUCTURED)
   combine.py              noisy_or(): the one probability-combination rule, shared
   money.py                parse_money(): shared US/EU-aware money parser (oracle + VLM extractor, DRY)
-  fusion.py               Fuser: noisy-OR risk (via combine.noisy_or) + approve/review/reject
-  cli.py / __main__.py    `slipguard eval` / `eval-pdf` / `eval-pdf-forensics` / `eval-image` / `eval-real` / `eval-extract` / `eval-pdf-extract` / `eval-calibration` / `score`
+  fusion.py               Fuser: risk (noisy-OR default, or a pluggable learned `combiner`) + approve/review/reject; shared decide/verdict
+  fusion_learned.py       LearnedFuser: dependency-free logistic regression over the same per-detector weighted signals; .fit / .explain (legible weights); opt-in combiner for Fuser
+  cli.py / __main__.py    `slipguard eval` / `eval-pdf` / `eval-pdf-forensics` / `eval-image` / `eval-real` / `eval-extract` / `eval-pdf-extract` / `eval-calibration` / `eval-fusion` / `score`
   extractors/
     base.py               Extractor ABC: handles / can_handle / extract(path) -> Receipt
     structured.py         StructuredExtractor: Receipt JSON -> Receipt (dependency-free)
@@ -470,7 +499,8 @@ src/slipguard/
     audit.py              audit_false_positives() -> FP report on a legitimate corpus (eval-real)
     extraction.py         evaluate_extractors() -> field-accuracy leaderboard vs an oracle, IMAGE (WildReceipt) + PDF (synthetic) routes (eval-extract / eval-pdf-extract)
     calibration.py        summarize_calibration() -> does per-value confidence predict a misread? AUC + reliability bins + abstain sweep (eval-calibration)
-tests/                    187 tests: detectors, synth invariants, harness, pdf + image forensics, loader, FP audit (+ image_bearing apples-to-apples), extraction + extraction-eval, money parser (incl. the `Rp.`-prefix 1000× regression CORD exposed), VLM parse-completeness + token-logprob scalar confidence (incremental token→char spans, min-over-digits, guard-arming) + docTR OCR-confidence guards, shared KIE/date/money units + row-merge (split two-column recovery), confidence calibration (roc_auc separation, reliability bins, threshold sweep, oracle-pairing), pdf_text (pypdfium2 rect→Line geometry, PDF-route binding, synthetic renderer, real born-digital round-trip), deep PDF forensics (compressed blind-spot recovery, JS/OpenAction/AcroForm/overlay structural flags, the use_deep knob, byte-vs-deep harness contrast — skip-gated on [pdf-forensics]), CORD oracle mapping (qty/line-amount/discount-netting/sub-flatten/locale, pure on hand-built dicts), ExpressExpense glob (recursive, sorted, images-only, limit, fetch-hint on missing dir)
+    fusion_bench.py       compare_fusion() -> learned logistic fuser vs noisy-OR: leakage-free split, synth-vs-real-legit AUC + real FP at matched recall + legible weights (eval-fusion)
+tests/                    198 tests: detectors, synth invariants, harness, pdf + image forensics, loader, FP audit (+ image_bearing apples-to-apples), extraction + extraction-eval, money parser (incl. the `Rp.`-prefix 1000× regression CORD exposed), VLM parse-completeness + token-logprob scalar confidence (incremental token→char spans, min-over-digits, guard-arming) + docTR OCR-confidence guards, shared KIE/date/money units + row-merge (split two-column recovery), confidence calibration (roc_auc separation, reliability bins, threshold sweep, oracle-pairing), pdf_text (pypdfium2 rect→Line geometry, PDF-route binding, synthetic renderer, real born-digital round-trip), deep PDF forensics (compressed blind-spot recovery, JS/OpenAction/AcroForm/overlay structural flags, the use_deep knob, byte-vs-deep harness contrast — skip-gated on [pdf-forensics]), CORD oracle mapping (qty/line-amount/discount-netting/sub-flatten/locale, pure on hand-built dicts), ExpressExpense glob (recursive, sorted, images-only, limit, fetch-hint on missing dir), learned fusion (feature-vector ordering by detector name + abstain→0, logistic separates separable data, deterministic fit, the noisy-detector-down-weight mechanism, pluggable-combiner override + clamp + noisy-OR-unchanged guard, .explain magnitude-sort) + fusion-bench smoke (synthetic-only run, real columns→n/a, provenance detectors flagged inactive)
 ```
 
 ## 7. How to add a new detection approach
@@ -541,8 +571,11 @@ Nothing else changes: fusion and the harness consume any `Detector` uniformly.
   it isolates a *different* root cause — our **3-field model is too narrow** for service-charge /
   discount / tax-inclusive totals — so a second corpus corroborates "FP = representation
   completeness, not detector logic" by a new mechanism (and names a richer-Receipt-model target).
-  **Next:** learned/calibrated fusion (#62) to replace noisy-OR — the M3 work that consumes the
-  PDF structural signal + scalar-confidence feature + these real-corpora FP findings.
+  **Learned fusion (#62, done):** consumed exactly these findings — see the "Learned fusion measured
+  vs noisy-OR" entry in §3. **Next:** (a) the richer `Receipt` model (#61's named target:
+  service-charge / discount / tax-inclusive fields) — the complementary, bigger FP lever; (b)
+  route-appropriate (provenance-bearing) training so the learned fuser can weight `pdf_meta` /
+  `image_meta` instead of zeroing them; (c) image pixel forensics (#60, **deferred — GPU/CPU-intensive**).
 - **M2 — PDF & metadata forensics (done):** `pdf_meta` ships incremental-update,
   editor-tag and creation/mod-date checks, dependency-free (Layer 1); `image_meta` ships the
   IMAGE-route sibling (EXIF editor tag + capture-vs-modify date gap, Pillow). **Layer 2 landed:**
@@ -554,8 +587,12 @@ Nothing else changes: fusion and the harness consume any `Detector` uniformly.
 - **M3 — Image route:** AI-generated detector (CLIP/ViT, diversity-trained) +
   tamper-localization, as **calibrated weak signals**, evaluated honestly under
   recompression/screenshot laundering.
-- **M3 — Real data + learned fusion:** wire Find-it-again etc.; replace noisy-OR
-  with a calibrated/learned fuser fit on measured per-detector performance.
+- **M3 — Real data + learned fusion:** *learned fusion done* — `fusion_learned.LearnedFuser`
+  (a transparent logistic over the same per-detector signals) is measured to cut real-corpus FP
+  **0.175→0.042 at matched fraud-recall** (`eval-fusion`), by down-weighting the noisy `arithmetic`
+  signal; noisy-OR stays the zero-training default and learned is opt-in + route-specific (see §3).
+  Remaining: real-*fraud* corpora (most real receipt sets are legitimate-only, so we train on
+  synthetic positives today) and route-appropriate fuser training including provenance fraud.
 
 ## 9. Constraints & sources
 
