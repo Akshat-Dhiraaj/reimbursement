@@ -23,6 +23,19 @@ def test_is_pdf():
     assert L._is_pdf("a.PDF") and not L._is_pdf("a.jpg")
 
 
+def test_import_order_has_no_circular_import():
+    """Regression: uvicorn loads ``web.api`` -> ``llm_validate`` FIRST, so importing this module
+    before the extractors package must not deadlock on a circular import (``llm_validate`` reaches
+    into ``extractors.vlm_qwen`` while the registry's ``groq_vlm`` reaches back into ``llm_validate``).
+    pytest imports the extractors package early, which MASKS the cycle — so check the real
+    uvicorn order in a fresh subprocess."""
+    import subprocess
+    import sys
+    r = subprocess.run([sys.executable, "-c", "import slipguard.llm_validate, slipguard.extractors"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
 def test_resolve_provider_follows_keys(monkeypatch):
     for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY", "GROQ_API_KEY_2", "LMSTUDIO_MODEL"):
         monkeypatch.delenv(k, raising=False)

@@ -606,6 +606,13 @@ noisy-OR→Signal tail of `pdf_meta`/`image_meta`; the three extractors share `e
 CLI gains `_workdir` / `_runnable_or_exit` / `_print_reports`; the four identical eval `_fmt` copies
 collapse to `eval.metrics._fmt`; `PROVIDERS` is one constant shared by the CLI + web API. Also fixed: a
 `.gitignore` bug where inline comments (`/fakes/  # …`) silently disabled the `fakes/` and `/dist/` rules.
+A follow-up caught a **circular import the consolidation introduced**: `groq_vlm` importing from `llm_validate`
+at module top closed a load-time loop (`llm_validate` -> `extractors.vlm_qwen` -> the registry's `groq_vlm` ->
+`llm_validate`) that only bites when `llm_validate` is imported FIRST — uvicorn's `web.api:app` order; the test
+suite imports `extractors` early and masked it. Fixed by making `llm_validate`'s `_parse_json_object` import
+lazy (consistent with its other in-function imports), so the module loads stdlib-only and the cycle can't form
+in any order; a **subprocess** regression test now imports in uvicorn's order (pytest's shared interpreter can't
+catch import-order cycles). **269 tests pass.**
 
 ## 4. Quickstart
 

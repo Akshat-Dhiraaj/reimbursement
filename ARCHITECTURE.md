@@ -351,7 +351,7 @@ src/slipguard/
   web/
     api.py                FastAPI backend: POST /api/validate (wraps validate, shapes Approved/Not-approved + reasons) + GET /api/health; serves frontend/dist (the [web] extra)
 frontend/                 React (Vite) drag-and-drop UI: drop a receipt -> Approved / Not approved + reasons; dev proxies /api to :8000, `npm run build` is served by `slipguard serve`
-tests/                    268 tests
+tests/                    269 tests
 ```
 
 ---

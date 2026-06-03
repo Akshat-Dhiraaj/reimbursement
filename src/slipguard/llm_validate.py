@@ -31,8 +31,6 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-from .extractors.vlm_qwen import _parse_json_object  # shared robust JSON-object extractor (DRY)
-
 #: default instruction file — repo-root prompts/validity_prompt.md (editable; --prompt overrides)
 _PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "validity_prompt.md"
 
@@ -365,6 +363,11 @@ def validate(path: str, *, provider: str = "auto", prompt_path: Optional[str] = 
     In ``auto`` mode it tries the providers in order (Groq → Gemini → optional LM Studio) and FALLS
     BACK to the next when one is rate-limited / exhausted (429/503), so a single depleted provider
     doesn't hard-fail."""
+    # Lazy import (like the _parse_date / default_detectors / Fuser imports elsewhere in this module):
+    # importing extractors.vlm_qwen at module-load time pulls in the extractors package -> groq_vlm ->
+    # back into this still-initializing module, a circular import (uvicorn loads web.api -> llm_validate
+    # FIRST, which is the order that triggers it). Deferred to call time it's safe and import-light.
+    from .extractors.vlm_qwen import _parse_json_object
     prompt = load_prompt(prompt_path)
     chain = _provider_chain(provider)
     text: Optional[str] = None
