@@ -58,8 +58,29 @@
       per-detector weights. Honest caveat: positives are synthetic, so this is
       synth-fraud vs real-legit separation, not real-fraud detection.
 
+  slipguard eval-prompt [--prompts FILE ...] [--corpus wildreceipt|cord] [--split ...]
+                        [--limit N] [--provider auto|groq|gemini] [--model ID]
+      Refine the `validate` prompt by MEASURED accuracy. Runs the LLM-judge pipeline with the
+      deterministic cross-check OFF (so it scores the *prompt*, not the safety net) over the
+      oracle corpus and ranks each prompt file by field accuracy (vendor/date/subtotal/tax/
+      total vs the oracle), alongside the decision distribution on these legitimate receipts
+      and the prompt's arithmetic self-consistency. Pick the most accurate by numbers. Needs an
+      API key. Caveat: legitimate-only oracle → measures field fidelity + clean-receipt
+      specificity, not fraud recall (no real fraud positives).
+
   slipguard score RECEIPT.json
       Score one receipt (JSON of the Receipt fields) and print the verdict.
+
+  slipguard validate RECEIPT.(jpg|png|pdf) [--provider auto|groq|gemini]
+                      [--prompt FILE] [--model ID] [--llm-only]
+      The SIMPLE LLM-judge pipeline: one Groq/Gemini call on the image/PDF driven by
+      prompts/validity_prompt.md, then a deterministic arithmetic/checksum cross-check that
+      can only escalate (never relax) the decision. Prints the JSON verdict.
+
+  slipguard serve [--host H] [--port P] [--reload]
+      Run the web UI backend (FastAPI) that wraps `validate` for the React drag-and-drop
+      frontend in ./frontend (drop a receipt -> Approved / Not approved + reasons). Needs the
+      [web] extra; serves the built frontend (frontend/dist) at / when present.
 """
 
 from __future__ import annotations
@@ -394,6 +415,35 @@ def cmd_eval_fusion(args: argparse.Namespace) -> None:
     print(compare_fusion(train, test, real, corpora=used))
 
 
+def cmd_eval_prompt(args: argparse.Namespace) -> None:
+    # Refine the `validate` prompt by measured field accuracy on the oracle. cross_check is OFF inside
+    # the harness, so this scores the PROMPT (not the deterministic safety net). Most accurate wins.
+    from .eval.prompt_eval import evaluate_prompt
+    truths = _oracle_truths(args)
+    prompts = args.prompts or [None]   # None -> the canonical prompts/validity_prompt.md
+    print(f"Ground truth: {len(truths)} {args.corpus} oracle receipts ({args.split} split)")
+    print(f"Scoring {len(prompts)} prompt(s); provider={args.provider}, cross-check OFF "
+          "(measuring the prompt itself)\n")
+
+    reports = []
+    for p in prompts:
+        report = evaluate_prompt(p, truths, provider=args.provider, model=args.model, progress=True)
+        print(report, end="\n\n")
+        reports.append(report)
+        if report.aborted:   # provider quota/availability died — don't burn calls on the rest
+            print("Aborting remaining prompts: the provider stopped responding (quota likely "
+                  "exhausted). Re-run when the daily limit resets.\n")
+            break
+
+    if len(reports) > 1:
+        ranked = sorted(reports,
+                        key=lambda r: r.overall if r.overall == r.overall else -1.0, reverse=True)
+        print("=== ranked by field macro accuracy ===")
+        for r in ranked:
+            print(f"  {_fmt_pct(r.overall)}  {r.name}")
+        print(f"\n=> most accurate: {ranked[0].name} (field macro {_fmt_pct(ranked[0].overall)})")
+
+
 def cmd_score(args: argparse.Namespace) -> None:
     route = route_path(args.path)
     extractor = extractor_for(route)
@@ -419,6 +469,36 @@ def cmd_score(args: argparse.Namespace) -> None:
         print(f"  - {reason}")
     if not verdict.reasons:
         print("  - no active signals")
+
+
+def cmd_validate(args: argparse.Namespace) -> None:
+    # The SIMPLE LLM-judge pipeline (separate from the detector/fusion `score` above): one
+    # multimodal API call (Groq/Gemini) driven by the external prompt -> a JSON validity verdict.
+    import json as _json
+
+    from .llm_validate import validate
+    verdict = validate(args.path, provider=args.provider, prompt_path=args.prompt,
+                       model=args.model, cross_check=not args.llm_only)
+    print(_json.dumps(verdict, indent=2, ensure_ascii=False))
+
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    # The web UI backend (the [web] extra): a FastAPI app wrapping the `validate` pipeline, served
+    # by uvicorn, for the React drag-and-drop frontend in ./frontend (see README §Web UI).
+    from pathlib import Path
+    try:
+        import uvicorn
+    except ImportError:
+        raise SystemExit('the web UI needs the [web] extra:\n  pip install -e ".[web]"')
+    print(f"slipguard API → http://{args.host}:{args.port}  "
+          "(POST /api/validate, GET /api/health)")
+    if (Path("frontend") / "dist").is_dir():
+        print("  serving the built frontend at /  (re-run `npm run build` in ./frontend to refresh)")
+    else:
+        print("  frontend not built — start the React dev server separately:\n"
+              "    cd frontend && npm install && npm run dev   (then open http://localhost:5173)")
+    # Import string (not the app object) so --reload can re-import on edits.
+    uvicorn.run("slipguard.web.api:app", host=args.host, port=args.port, reload=args.reload)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -518,9 +598,42 @@ def build_parser() -> argparse.ArgumentParser:
                           "fuser learns pdf_meta/image_meta weights (not the structured-only zero)")
     pfu.set_defaults(func=cmd_eval_fusion)
 
+    pep = sub.add_parser("eval-prompt",
+                         help="rank validity-prompt variants by measured field accuracy on the oracle")
+    pep.add_argument("--prompts", nargs="+", default=None,
+                     help="prompt files to compare (default: the canonical prompts/validity_prompt.md)")
+    pep.add_argument("--corpus", default="wildreceipt", choices=_CORPUS_CHOICES,
+                     help="oracle corpus (wildreceipt: vendor+date+money; cord: money-only)")
+    pep.add_argument("--path", default=None, help="dataset directory (default: datasets/<corpus>/)")
+    pep.add_argument("--split", default="test", choices=_SPLIT_CHOICES)
+    pep.add_argument("--limit", type=int, default=20,
+                     help="score the first N oracle receipts (free-tier API budget; default 20)")
+    pep.add_argument("--provider", default="auto", choices=("auto", "groq", "gemini", "lmstudio"))
+    pep.add_argument("--model", default=None, help="override the model id")
+    pep.set_defaults(func=cmd_eval_prompt)
+
     ps = sub.add_parser("score", help="score a single receipt JSON")
     ps.add_argument("path")
     ps.set_defaults(func=cmd_score)
+
+    pv = sub.add_parser("validate",
+                        help="SIMPLE LLM-judge validity check on one image/PDF via Groq/Gemini")
+    pv.add_argument("path", help="receipt image or PDF")
+    pv.add_argument("--provider", default="auto", choices=("auto", "groq", "gemini", "lmstudio"),
+                    help="auto: Gemini if its key is set, else Groq")
+    pv.add_argument("--prompt", default=None,
+                    help="instruction file (default: prompts/validity_prompt.md)")
+    pv.add_argument("--model", default=None, help="override the model id")
+    pv.add_argument("--llm-only", action="store_true",
+                    help="skip the deterministic arithmetic/checksum cross-check (LLM verdict only)")
+    pv.set_defaults(func=cmd_validate)
+
+    psv = sub.add_parser("serve",
+                         help="run the web UI backend (FastAPI) for the React frontend — needs [web]")
+    psv.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1)")
+    psv.add_argument("--port", type=int, default=8000, help="port (default: 8000)")
+    psv.add_argument("--reload", action="store_true", help="auto-reload on code changes (dev)")
+    psv.set_defaults(func=cmd_serve)
     return parser
 
 
@@ -531,6 +644,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):  # pragma: no cover - non-reconfigurable stream
         pass
+    # Pick up GROQ_API_KEY / GEMINI_API_KEY from a repo-root .env so `validate` / `eval-prompt`
+    # work out of the box (the same loader the web backend uses).
+    from .llm_validate import load_local_env
+    load_local_env()
     args = build_parser().parse_args(argv)
     args.func(args)
 

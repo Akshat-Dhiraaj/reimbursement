@@ -54,6 +54,22 @@ pdf-forensics = [
 c2pa = [
     "c2pa-python>=0.32",
 ]
+# DSPy DEV-TIME prompt optimizer (src/slipguard/dspy_optimize.py) — NOT a runtime dependency.
+# It tunes the extraction/validity prompt against the eval metric; any win is exported to a prompt
+# file and production stays DSPy-free. MIT, but heavy (pulls litellm + optuna + openai), so it is a
+# dev-only optional extra.
+dspy = [
+    "dspy>=3",
+]
+# Web UI backend — a thin FastAPI wrapper around the `validate` pipeline (src/slipguard/web/api.py),
+# paired with the React drag-and-drop frontend in ./frontend. All commercial-safe: FastAPI (MIT),
+# uvicorn (BSD-3-Clause), python-multipart (Apache-2.0). Kept optional so the core CLI install stays
+# light; `slipguard serve` and the API import-guard on these and tell you to install .[web] if absent.
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+]
 
 [project.scripts]
 slipguard = "slipguard.cli:main"

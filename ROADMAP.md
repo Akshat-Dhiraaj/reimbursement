@@ -80,7 +80,7 @@ Status as of 2026-06-02. Rationale for the choices below lives in
 - Evidence: image benchmark (70 samples) — `image_meta` AUC 1.0 / recall 1.0 / 0 FP
   over 30 EXIF-provenance tampers (editor tag + capture/modify gap); the structured
   detectors and `pdf_meta` correctly abstain on the IMAGE route.
-- **229 tests pass** (full suite, all milestones; +11 for learned fusion (#62), +5 for the
+- **259 tests pass** (full suite, all milestones; +6 for the prompt-eval harness + LM Studio local provider + backoff-cap/fail-fast (#92–97), +8 for the FastAPI web UI backend (#86–91: shaping + endpoints, offline), +5 for the validate deterministic cross-check (#85), +5 for the DSPy optimizer offline tests (#84), +6 for the simple LLM-judge `validate` pipeline (#83), +11 for learned fusion (#62), +5 for the
   richer `Receipt` model (#81: service-charge/discount/tax-inclusive arithmetic), and +26 for
   lightweight forensics (#71/#72/#76) — the logistic fit / pluggable combiner / down-weights-a-noisy-
   detector + `compare_fusion` smoke, plus the PDF `/Prev` content-edit & signature-coverage

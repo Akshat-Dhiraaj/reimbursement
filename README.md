@@ -47,7 +47,9 @@ never the gate**.
 | Layer | Status | Evidence |
 |---|---|---|
 | Domain models + pluggable detector framework | ✅ Done | `models.py`, `detectors/base.py` |
-| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 229 tests; synthetic leaderboard |
+| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 259 tests; synthetic leaderboard |
+| **Simple LLM-judge pipeline** (alt: image/PDF → Groq / Gemini / **local LM Studio** → verdict) | ✅ Done | `slipguard validate <file>`; prompt in `prompts/validity_prompt.md`, refined by measured `eval-prompt` |
+| **Web UI** (drag-and-drop a receipt → Approved / Not approved + reasons) | ✅ Done | FastAPI `src/slipguard/web/` + React `frontend/`; `slipguard serve` |
 | **Per-task paradigm comparison** (pure-Python vs local-model vs API) | ✅ Done — measured | [SCORECARD.md](SCORECARD.md) |
 | Noisy-OR fusion + eval harness + CLI | ✅ Done | `slipguard eval` |
 | **Learned logistic fusion** (opt-in; same signals, learned weights) | ✅ Done (measured: real FP **0.175→0.042** at matched recall) | `slipguard eval-fusion` |
@@ -74,8 +76,9 @@ pip install -e ".[dev]"
 #   pip install -e ".[pdf]"   # pypdfium2 born-digital PDF text extractor (Apache/BSD) — light, CPU-only
 #   pip install -e ".[pdf-forensics]"  # pikepdf deep PDF provenance/structure layer (MPL-2.0) — light, CPU-only
 #   pip install -e ".[c2pa]"  # C2PA / Content Credentials reader for image_meta (MIT/Apache) — CPU-only but ~260 MB
+#   pip install -e ".[web]"   # FastAPI web UI backend for the React drag-and-drop frontend (MIT/BSD/Apache) — light
 
-python -m pytest                  # 229 tests
+python -m pytest                  # 259 tests
 slipguard eval                    # synthetic structured benchmark leaderboard
 slipguard eval-pdf                # synthetic PDF-provenance leaderboard
 slipguard eval-pdf-forensics      # compressed-PDF deep forensics: byte-only vs pikepdf recall (needs [pdf-forensics])
@@ -85,7 +88,20 @@ slipguard eval-extract            # rank IMAGE extractors (docTR vs VLM) on fiel
 slipguard eval-pdf-extract        # rank PDF extractor(s) on field accuracy vs a synthetic oracle (needs [pdf])
 slipguard eval-calibration        # does an extractor's per-value confidence predict a misread? (needs [vlm])
 slipguard eval-fusion             # learned logistic fuser vs noisy-OR: real FP at matched recall + legible weights
-slipguard score data/demo.json    # score one structured receipt JSON
+slipguard score data/demo.json    # score one structured receipt JSON (detector/fusion pipeline)
+slipguard validate receipt.jpg    # SIMPLE alt pipeline: image/PDF -> Groq / Gemini / LM Studio -> JSON validity verdict,
+                                   #   cross-checked by the deterministic detectors (stricter verdict wins; --llm-only to skip)
+                                   #   (--provider groq|gemini|lmstudio; cloud needs GROQ_API_KEY/GEMINI_API_KEY; edit prompts/validity_prompt.md)
+slipguard eval-prompt --prompts prompts/validity_prompt.md prompts/experiments/p1_sharpened.md
+                                   # rank validity-prompt variants by MEASURED field accuracy vs the oracle (refine the prompt by numbers)
+                                   #   add `--provider lmstudio --model qwen/...` to run LOCAL via LM Studio (no key, no daily quota)
+
+# Web UI — drag-and-drop a receipt, get Approved / Not approved + the reasons (wraps `validate`):
+pip install -e ".[web]"                            # FastAPI + uvicorn (MIT/BSD/Apache)
+(cd frontend && npm install && npm run build)      # build the React app once into frontend/dist
+slipguard serve                                    # → http://127.0.0.1:8000  (serves the UI *and* /api)
+#   key is read from .env / the env; live dev with hot-reload instead of the build:
+#     slipguard serve --reload      &      (cd frontend && npm run dev)   # UI on http://localhost:5173
 
 # Real corpora for eval-real (none committed; all commercial-safe):
 #  wildreceipt (Apache-2.0):
@@ -239,9 +255,14 @@ src/slipguard/
   detectors/       one file per detection method + the Detector ABC + registry
   forensics/       provenance inspectors: PDF (bytes: %%EOF/editor/date + /Prev content-edit + signature /ByteRange coverage; optional pikepdf deep) + image EXIF (Pillow) + C2PA Content Credentials (optional [c2pa])
   data/            synthetic generators (images + born-digital PDFs + compressed deep-forensics PDFs) + real-corpus loaders (WildReceipt, CORD, ExpressExpense)
-  eval/            metrics, ranking harness, false-positive audit, extraction-accuracy + confidence-calibration + learned-fusion benchmarks
-  cli.py           `slipguard eval | eval-pdf | eval-pdf-forensics | eval-image | eval-real --corpus … | eval-extract | eval-pdf-extract | eval-calibration | eval-fusion | score`
-tests/             229 tests
+  eval/            metrics, ranking harness, false-positive audit, extraction-accuracy + confidence-calibration + learned-fusion + prompt-accuracy benchmarks
+  cli.py           `slipguard eval | eval-pdf | eval-pdf-forensics | eval-image | eval-real --corpus … | eval-extract | eval-pdf-extract | eval-calibration | eval-fusion | eval-prompt | score | validate | serve`
+  llm_validate.py  the SIMPLE alt pipeline: image/PDF -> Groq / Gemini / local LM Studio (one call) -> JSON validity verdict; prompt-as-config
+  web/api.py       FastAPI web UI backend: POST /api/validate (wraps `validate`) + GET /api/health; serves frontend/dist (the [web] extra)
+prompts/
+  validity_prompt.md  editable instructions for the `validate` pipeline (AI-edit/date/arithmetic/vendor checks)
+frontend/          React (Vite) drag-and-drop UI -> /api/validate; `npm run dev` (proxy :8000) or `npm run build` -> served by `slipguard serve`
+tests/             259 tests
 ```
 
 ## 7. Licence posture (summary)

@@ -114,6 +114,18 @@ WildReceipt **0.364 → 0.324**.
   hashes), so it does not apply to inbound third-party receipts. ✓ verified —
   https://www.helpnetsecurity.com/2025/07/07/detect-pdf-tampering-forgery/
 
+### 1.12 DSPy prompt optimization — tested as a dev-time tool, **not adopted** (measured)
+**Tried:** a dev-time DSPy optimizer (`src/slipguard/dspy_optimize.py`, optional `[dspy]` extra)
+tuning the extraction prompt over the *same* Groq model, scored by the *same* field metric as
+`eval-extract`. **Measured (WildReceipt, N=8 test):** DSPy *zero-shot* macro **0.896** ≈ the hand
+prompt (**0.847**, N=50), but **BootstrapFewShot optimization made it worse — macro 0.410 with 4/8
+extractor errors**: few-shot demos for a *vision* task stuff multiple receipt images into the prompt
+→ token/context blow-up with no accuracy gain. **Not adopted** — the runtime stays DSPy-free, and the
+finding confirms the bottleneck is *not* prompt phrasing. The only untested mode that might help is
+MIPRO/COPRO *instruction* optimization (no image demos), and only once real-fraud labels exist to
+optimize a real target.
+- DSPy (MIT) — ✓ verified — https://github.com/stanfordnlp/dspy · https://dspy.ai
+
 ---
 
 ## 2. Links & licences at a glance (shipping path = commercial-safe only)

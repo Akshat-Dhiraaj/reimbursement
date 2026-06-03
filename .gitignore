@@ -33,6 +33,11 @@ htmlcov/
 .env.*
 !.env.example
 
+# Frontend (web UI) — Node toolchain artifacts; the React source under frontend/src is tracked.
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
 # OS / editor
 .DS_Store
 .idea/

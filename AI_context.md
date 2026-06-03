@@ -489,6 +489,85 @@ total-with-service/discount ×15 + tax-inclusive-lines ×2). 3 CORD residuals re
 suppressing real signal). Monotonic-on-FP (the changes only RELAX), so synthetic tests are
 unchanged. **229 tests pass.** (`.env` created for `GROQ_API_KEY`, gitignored + verified.)
 
+**`REFERENCES.md` (#82) + the simple LLM-judge pipeline (#83) (2026-06-02).**
+- **#82 `REFERENCES.md`** — sourced choices (what we picked over what, and why) with link-trust
+  marking (✓ verified / canonical). Uncertain research-pass URLs were *fetched to verify* — the
+  C2PA spec, arXiv FreqCross, Amped double-JPEG, the PRNU review and the Pretoria PDF-tamper article
+  all resolved; two (infosecinstitute ELA, a defense.gov CSI PDF) returned 403 → **omitted**, not
+  cited unverified. Linked from README.
+- **#83 — a standalone SECOND pipeline:** `slipguard validate <image|pdf>` (`llm_validate.py`)
+  intakes one document → **ONE hosted multimodal call (Groq or Gemini, auto-selected by which key is
+  set)** → a structured JSON validity verdict (vendor / date / total / tax, `ai_or_edit_suspected`
+  + signs, `date_valid`, `arithmetic_consistent`, `red_flags`, `decision` approve/review/reject,
+  confidence, summary). **The model's instructions live in an editable external
+  `prompts/validity_prompt.md`** (prompt-as-config — the user's explicit ask; no code change to
+  re-tune). PDFs go native to Gemini / are rasterised via pypdfium2 for image-only Groq; stdlib
+  `urllib` (no new dep), 429 backoff, browser-UA for Groq's Cloudflare, **fail-safe to `review`** on
+  unparseable output. The prompt bakes in the honest stance (pixel AI-edit = review-not-proof;
+  arithmetic accounts for service/discount/tax-inclusive). **Live Groq smoke (real receipt): clean
+  verdict — CVS/pharmacy, total 9.73, arithmetic_consistent true, approve, conf 0.9.** Gemini path is
+  code-complete but untested live (no Gemini key). This is the "just ask a big model" pipeline,
+  alongside the lightweight/private detector-fusion one. **235 tests pass** (+6 offline; live by hand).
+- **#84 DSPy — tested as a dev-time optimizer, measured NOT a win.** `dspy_optimize.py` (optional
+  `[dspy]` extra; runtime stays DSPy-free) tunes the extraction prompt over the same Groq model,
+  scored by the same field metric. Measured (WildReceipt, N=8): DSPy *zero-shot* **0.896** ≈ the
+  hand prompt (0.847), but **BootstrapFewShot made it worse — 0.410, 4/8 errors** (few-shot demos
+  for a vision task blow up the multi-image prompt). Confirms the bottleneck isn't prompt phrasing;
+  kept the harness as a recorded dev experiment (see REFERENCES §1.12). **240 tests pass.**
+- **#85 validate refined — deterministic cross-check, kept simple.** The `validate` pipeline no longer
+  trusts the model's self-judged math. The prompt now also extracts subtotal/service_charge/discount/
+  tax_id/country; `reconcile()` builds a Receipt from the LLM's OWN fields, runs `default_detectors()` +
+  `Fuser` on it (+ the real file for byte-layer pdf_meta), then takes the **stricter** of {LLM decision,
+  deterministic decision} — never relaxing (output gains `llm_decision`/`deterministic_decision`/
+  `deterministic_reasons`). Patches the measured weakness (a VLM confidently mis-summing yet reporting
+  `arithmetic_consistent: true`) for FREE — no new dep, no 2nd model call (one Receipt build + the
+  existing detectors). `--llm-only` disables it. Live smoke (real CVS receipt): LLM approve +
+  deterministic re-check (8.99+0.74=9.73 ✓ via the arithmetic detector) → approve; a broken total /
+  future date / bad tax-id checksum would now escalate even on an LLM 'approve'. It's the "ensemble the
+  two pipelines" idea in its cheapest form: LLM = perception, pure-Python = math/checksum/recency.
+  **245 tests pass** (+5 cross-check tests).
+- **#86–91 web UI — drag-and-drop receipt → Approved / Not approved + reasons.** A thin **FastAPI**
+  backend (`src/slipguard/web/api.py`, the `[web]` extra: fastapi/uvicorn/python-multipart, all
+  MIT/BSD/Apache) wraps `validate()`: `POST /api/validate` (multipart image/PDF → the shaped verdict)
+  and `GET /api/health` (which provider is resolvable). No new fraud logic — it is transport over the
+  existing pipeline, so the decision rules stay in one place; `validate()`'s blocking network call runs
+  in a threadpool. The shaped response surfaces **both** the model's reasons and the deterministic
+  cross-check's, tagged by source — the two-layer design made visible (on an approve the deterministic
+  reasons read positively, which is the "show the reason" ask). A **React (Vite)** drag-and-drop UI in
+  `frontend/` proxies `/api` to :8000 in dev; `npm run build` is served at `/` by `slipguard serve`, so
+  production is one uvicorn port. Verified live end-to-end on a real WildReceipt receipt (Groq via
+  `.env`): health ok, `POST /api/validate` → `approved:true`, fields extracted (CHF hotel receipt,
+  50.65+3.85=54.50 ✓), deterministic re-check ran and agreed. **253 tests pass** (+8: pure shaping
+  `_shape`/`_num` + TestClient health/validate/415/503, offline via monkeypatch).
+- **#92–97 prompt refinement (MEASURED) + local LM Studio provider.** Built `eval-prompt`
+  (`eval/prompt_eval.py` + `slipguard eval-prompt --prompts a.md b.md …`) to refine the prompt by
+  numbers: runs `validate(cross_check=False)` over the WildReceipt oracle and reports field accuracy
+  (vendor/date/subtotal/tax/total — same `_vendor_ok`/`_money_ok` as the extractor leaderboard) +
+  decision distribution + the prompt's own arithmetic self-consistency; ranks the prompt files.
+  Variants in `prompts/experiments/` (p1_sharpened, p2_terse, p3_reasoning). **Result (local
+  gemma-4-e4b, N=12, 0 errors): P0 `validity_prompt` 0.937 = p2_terse 0.937 > p1/p3 0.855** (the gap
+  is one date misread on an n=2 field — noise; P0 wins the tie on arith-agreement 1.0 vs .875).
+  **Refinements did NOT beat the current prompt → KEPT P0 unchanged** (matches Gemini, P0=0.943 N=20).
+  The binding wall is the free-tier DAILY quota — Groq ≈500k tokens/day (~200 vision calls; the
+  "87-min hang" was per-minute throttle near the cap + buffered stdout, not a bug), Gemini = **20
+  req/day** — so an 80-call cloud comparison can't finish in one day. **LM Studio (`--provider
+  lmstudio`)** removes the wall: OpenAI-compatible at localhost:1234, no key, no quota, private; pass
+  `--model` a loaded VISION model. Local reasoning/hybrid models (Qwen3/Gemma) emit hidden reasoning
+  before the answer → LM Studio uses `max_tokens=4096` (1024 returned empty `content`); qwen3.6-35b
+  won't stop reasoning (~57s/call), gemma-4-26b needs ~35 GB, **gemma-4-e4b works** (~37s/call).
+  Resilience: `_MAX_BACKOFF=90` (a daily `retry-after` of hours can't hang the client), streaming +
+  fail-fast (abort after 4 consecutive errors). Gemini now uses the `X-goog-api-key` header +
+  `gemini-flash-latest`. **259 tests pass.**
+- **#98–101 prompt iteration round 2 — the MODEL-MISMATCH lesson.** Error analysis (per-field
+  truth-vs-pred on the current prompt, local gemma N=24) found the dominant fixable miss: the model
+  NULLs tax/subtotal/total that are printed. Built `prompts/experiments/p4_complete.md` (P0 + "fill any
+  printed amount; derive the single missing one from total=subtotal+tax when safe"). **Local N=24: P4
+  0.910 > P0 0.876** (recovers tax/total nulls, zero regression). **But Groq production N=10: P0 0.958 >
+  P4 0.940** — P4's *derive* rule broke a subtotal + dropped arith-agreement. The local win did NOT
+  transfer → **kept P0**, confirmed best on BOTH APIs (Groq 0.958, Gemini 0.943). Takeaway: a weak local
+  model is fine for cheap *exploration*, but prompt wins MUST be confirmed on the production API — the
+  local model's null-problem doesn't exist on the strong APIs, so optimizing on it misleads.
+
 ## 4. Quickstart
 
 ```bash
@@ -500,8 +579,9 @@ pip install -e ".[dev]"          # editable install + pytest
 #   pip install -e ".[pdf]"      # pypdfium2 born-digital PDF text extractor (Apache/BSD) — light, CPU-only
 #   pip install -e ".[pdf-forensics]"  # pikepdf deep PDF provenance/structure layer (MPL-2.0) — light, CPU-only
 #   pip install -e ".[c2pa]"     # C2PA / Content Credentials reader for image_meta (MIT/Apache) — CPU-only but ~260 MB
+#   pip install -e ".[web]"      # FastAPI web UI backend for the React drag-and-drop frontend (MIT/BSD/Apache) — light
 
-python -m pytest                 # run tests (229)
+python -m pytest                 # run tests (259)
 slipguard eval                   # structured benchmark leaderboard
 slipguard eval-pdf               # PDF-provenance benchmark leaderboard
 slipguard eval-pdf-forensics     # compressed-PDF deep forensics: byte-only vs pikepdf recall (needs [pdf-forensics])
@@ -511,6 +591,10 @@ slipguard eval-extract           # rank IMAGE extractors (docTR vs VLM) on field
 slipguard eval-pdf-extract       # rank PDF extractor(s) on field accuracy vs a synthetic oracle (needs [pdf])
 slipguard eval-fusion            # learned logistic fuser vs noisy-OR (real-FP at matched recall + legible weights); --multiroute trains pdf_meta/image_meta too
 slipguard score data/demo.json   # score one receipt JSON (see data/demo.json)
+slipguard validate receipt.jpg   # SIMPLE LLM-judge pipeline (Groq/Gemini/LM Studio) + deterministic cross-check; --provider, --llm-only
+slipguard eval-prompt --prompts prompts/validity_prompt.md prompts/experiments/p1_sharpened.md
+                                 #   rank validity-prompt variants by MEASURED field accuracy vs the oracle; add `--provider lmstudio --model qwen/...` for LOCAL (no key/quota)
+slipguard serve                  # web UI: FastAPI + built React frontend on http://127.0.0.1:8000 (needs [web]; run `cd frontend && npm run build` first)
 
 # Fetch the real corpora for eval-real (not committed; all commercial-safe):
 #   wildreceipt (Apache-2.0):
@@ -560,7 +644,11 @@ src/slipguard/
   money.py                parse_money(): shared US/EU-aware money parser (oracle + VLM extractor, DRY)
   fusion.py               Fuser: risk (noisy-OR default, or a pluggable learned `combiner`) + approve/review/reject; shared decide/verdict
   fusion_learned.py       LearnedFuser: dependency-free logistic regression over the same per-detector weighted signals; .fit / .explain (legible weights); opt-in combiner for Fuser
-  cli.py / __main__.py    `slipguard eval` / `eval-pdf` / `eval-pdf-forensics` / `eval-image` / `eval-real` / `eval-extract` / `eval-pdf-extract` / `eval-calibration` / `eval-fusion` / `score`
+  llm_validate.py         the SIMPLE alt pipeline (separate from detectors): image/PDF -> one Groq / Gemini / local-LM-Studio call (external prompt; --provider) -> JSON validity verdict; stdlib urllib, 429 backoff (capped _MAX_BACKOFF), fail-safe to review. `reconcile()` then cross-checks the verdict against the deterministic detectors (Receipt from the LLM's OWN fields -> default_detectors+Fuser; stricter of {LLM, deterministic} wins, never relaxes; `cross_check=False` / CLI `--llm-only` to skip)
+  dspy_optimize.py        DEV-TIME ONLY (optional [dspy] extra): DSPy prompt-optimizer experiment over Groq, scored by the eval/extraction metric; measured NOT a win (few-shot hurt vision extraction) — runtime stays DSPy-free
+  cli.py / __main__.py    `slipguard eval` / `eval-pdf` / `eval-pdf-forensics` / `eval-image` / `eval-real` / `eval-extract` / `eval-pdf-extract` / `eval-calibration` / `eval-fusion` / `eval-prompt` / `score` / `validate` / `serve`
+  web/api.py              FastAPI web UI backend (the [web] extra): POST /api/validate (wraps validate(), shapes Approved/Not-approved + source-tagged reasons) + GET /api/health; runs validate() in a threadpool; serves frontend/dist at / when built; loads a repo-root .env
+prompts/validity_prompt.md  editable instructions for the `validate` pipeline (AI-edit/date/arithmetic/vendor checks + JSON schema; also extracts subtotal/service_charge/discount/tax_id/country so numerics get a deterministic re-check; prompt-as-config)
   extractors/
     base.py               Extractor ABC: handles / can_handle / extract(path) -> Receipt
     structured.py         StructuredExtractor: Receipt JSON -> Receipt (dependency-free)
@@ -597,7 +685,9 @@ src/slipguard/
     extraction.py         evaluate_extractors() -> field-accuracy leaderboard vs an oracle, IMAGE (WildReceipt) + PDF (synthetic) routes (eval-extract / eval-pdf-extract)
     calibration.py        summarize_calibration() -> does per-value confidence predict a misread? AUC + reliability bins + abstain sweep (eval-calibration)
     fusion_bench.py       compare_fusion() -> learned logistic fuser vs noisy-OR: leakage-free split, synth-vs-real-legit AUC + real FP at matched recall + legible weights (eval-fusion)
-tests/                    229 tests: detectors (incl. arithmetic service-charge/discount/tax-inclusive reconciliation), synth invariants, harness, pdf + image forensics (incl. /Prev content-edit, signature coverage, content-stream overlay), C2PA classify, loader, FP audit (+ image_bearing apples-to-apples), extraction + extraction-eval, money parser (incl. the `Rp.`-prefix 1000× regression CORD exposed), VLM parse-completeness + token-logprob scalar confidence (incremental token→char spans, min-over-digits, guard-arming) + docTR OCR-confidence guards, shared KIE/date/money units + row-merge (split two-column recovery), confidence calibration (roc_auc separation, reliability bins, threshold sweep, oracle-pairing), pdf_text (pypdfium2 rect→Line geometry, PDF-route binding, synthetic renderer, real born-digital round-trip), deep PDF forensics (compressed blind-spot recovery, JS/OpenAction/AcroForm/overlay structural flags, the use_deep knob, byte-vs-deep harness contrast — skip-gated on [pdf-forensics]), CORD oracle mapping (qty/line-amount/discount-netting/sub-flatten/locale, pure on hand-built dicts), ExpressExpense glob (recursive, sorted, images-only, limit, fetch-hint on missing dir), learned fusion (feature-vector ordering by detector name + abstain→0, logistic separates separable data, deterministic fit, the noisy-detector-down-weight mechanism, pluggable-combiner override + clamp + noisy-OR-unchanged guard, .explain magnitude-sort) + fusion-bench smoke (synthetic-only run, real columns→n/a, provenance detectors flagged inactive)
+    prompt_eval.py        evaluate_prompt() -> rank validity-prompt variants by field accuracy vs the oracle (cross-check OFF — measures the PROMPT) + decision dist + arithmetic self-consistency; streams + fails fast on consecutive errors (eval-prompt)
+frontend/                 React (Vite) drag-and-drop UI: drop a receipt -> Approved / Not approved + reasons + extracted fields/checks; dev proxies /api to :8000, `npm run build` served by `slipguard serve`
+tests/                    259 tests: detectors (incl. arithmetic service-charge/discount/tax-inclusive reconciliation), the simple LLM-judge `validate` pipeline (prompt load, provider resolution, PDF-to-Gemini-vs-rasterise, verdict parse + fail-safe-to-review) + its deterministic cross-check (verdict→Receipt mapping, stricter-verdict-wins, never-downgrade, --llm-only bypass, reasons surfaced), the DSPy optimizer's pure pieces (field metric, pred→Receipt mapping, bootstrap-metric pass/fail, signature builds), synth invariants, harness, pdf + image forensics (incl. /Prev content-edit, signature coverage, content-stream overlay), C2PA classify, loader, FP audit (+ image_bearing apples-to-apples), extraction + extraction-eval, money parser (incl. the `Rp.`-prefix 1000× regression CORD exposed), VLM parse-completeness + token-logprob scalar confidence (incremental token→char spans, min-over-digits, guard-arming) + docTR OCR-confidence guards, shared KIE/date/money units + row-merge (split two-column recovery), confidence calibration (roc_auc separation, reliability bins, threshold sweep, oracle-pairing), pdf_text (pypdfium2 rect→Line geometry, PDF-route binding, synthetic renderer, real born-digital round-trip), deep PDF forensics (compressed blind-spot recovery, JS/OpenAction/AcroForm/overlay structural flags, the use_deep knob, byte-vs-deep harness contrast — skip-gated on [pdf-forensics]), CORD oracle mapping (qty/line-amount/discount-netting/sub-flatten/locale, pure on hand-built dicts), ExpressExpense glob (recursive, sorted, images-only, limit, fetch-hint on missing dir), learned fusion (feature-vector ordering by detector name + abstain→0, logistic separates separable data, deterministic fit, the noisy-detector-down-weight mechanism, pluggable-combiner override + clamp + noisy-OR-unchanged guard, .explain magnitude-sort) + fusion-bench smoke (synthetic-only run, real columns→n/a, provenance detectors flagged inactive), and the web UI backend (_shape Approved/not-approved + source-tagged reasons, _num coercion; TestClient health / validate / 415-unsupported-type / 503-missing-key — offline via a monkeypatched validate(), skip-gated on FastAPI + httpx), the prompt-eval harness (field/decision/arithmetic scoring on canned verdicts, parse-fail + consecutive-error fail-fast — offline), the LM Studio local provider (no-model guard + validate() dispatch to the local caller), and the _post_json backoff cap (a huge retry-after is capped, then gives up)
 ```
 
 ## 7. How to add a new detection approach

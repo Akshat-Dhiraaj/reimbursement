@@ -346,7 +346,11 @@ src/slipguard/
     extraction.py         evaluate_extractors() -> field-accuracy leaderboard vs oracle
     calibration.py        summarize_calibration() -> does per-value confidence predict a misread?
     fusion_bench.py       compare_fusion() -> learned logistic fuser vs noisy-OR (real FP at matched recall; the fuser selector)
-tests/                    229 tests
+    prompt_eval.py        evaluate_prompt() -> rank validity-prompt variants by field accuracy vs the oracle (cross-check OFF; measures the PROMPT) — the prompt selector (eval-prompt)
+  web/
+    api.py                FastAPI backend: POST /api/validate (wraps validate, shapes Approved/Not-approved + reasons) + GET /api/health; serves frontend/dist (the [web] extra)
+frontend/                 React (Vite) drag-and-drop UI: drop a receipt -> Approved / Not approved + reasons; dev proxies /api to :8000, `npm run build` is served by `slipguard serve`
+tests/                    259 tests
 ```
 
 ---
