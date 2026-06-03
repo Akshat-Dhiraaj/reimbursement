@@ -24,15 +24,16 @@ def test_is_pdf():
 
 
 def test_resolve_provider_follows_keys(monkeypatch):
-    for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY"):
+    for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY", "GROQ_API_KEY_2", "LMSTUDIO_MODEL"):
         monkeypatch.delenv(k, raising=False)
     with pytest.raises(RuntimeError):
         L.resolve_provider("auto")
     monkeypatch.setenv("GROQ_API_KEY", "x")
     assert L.resolve_provider("auto") == "groq"
     monkeypatch.setenv("GEMINI_API_KEY", "y")
-    assert L.resolve_provider("auto") == "gemini"   # gemini wins when both are set
-    assert L.resolve_provider("groq") == "groq"      # explicit choice overrides auto
+    assert L.resolve_provider("auto") == "groq"             # groq wins (more quota + multi-key) when both set
+    assert L._provider_chain("auto") == ["groq", "gemini"]  # the full fallback order
+    assert L.resolve_provider("gemini") == "gemini"         # explicit choice overrides auto
 
 
 def test_pdf_goes_native_to_gemini(tmp_path):
@@ -133,6 +134,24 @@ def test_call_groq_rotates_to_second_key_on_429(monkeypatch):
     assert out == '{"decision":"approve"}'
     assert [k for k, _ in seen] == ["k1", "k2"]          # rotated to the 2nd key
     assert seen[0][1] == 0 and seen[1][1] == 4           # non-last fast (retries=0); last backs off
+
+
+def test_validate_falls_back_across_providers_on_429(monkeypatch, tmp_path):
+    # auto chain is groq -> gemini; if groq is rate-limited, validate() falls back to gemini.
+    import urllib.error
+    img = _jpg(tmp_path)
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    monkeypatch.setenv("GEMINI_API_KEY", "y")
+    monkeypatch.delenv("GROQ_API_KEY_2", raising=False)
+    monkeypatch.delenv("LMSTUDIO_MODEL", raising=False)
+
+    def groq_429(*a):
+        raise urllib.error.HTTPError("u", 429, "rate limit", {}, None)
+
+    monkeypatch.setattr(L, "_call_groq", groq_429)
+    monkeypatch.setattr(L, "_call_gemini", lambda *a: '{"decision":"approve"}')
+    v = L.validate(img, cross_check=False)               # auto: groq(429) -> gemini(ok)
+    assert v["decision"] == "approve" and v["_provider"] == "gemini"
 
 
 # --- the deterministic cross-check refinement (#85) --------------------------

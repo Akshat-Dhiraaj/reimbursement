@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import urllib.error
 from pathlib import Path
 from typing import Optional
 
@@ -180,6 +181,14 @@ async def api_validate(
         raise HTTPException(status_code=503, detail=f"Missing API key for the selected provider: {exc}.")
     except ImportError as exc:                        # e.g. PDF upload but pypdfium2 not installed
         raise HTTPException(status_code=501, detail=f"A dependency is missing for this input: {exc}.")
+    except urllib.error.HTTPError as exc:             # every key/provider exhausted (chain raised the last 429)
+        if exc.code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail="All configured API keys are rate-limited or out of daily quota. "
+                       "Add another key (e.g. GROQ_API_KEY_2) or try again shortly.",
+            )
+        raise HTTPException(status_code=502, detail=f"Provider returned HTTP {exc.code}.")
     except Exception as exc:                          # network / model / parse failure
         raise HTTPException(status_code=502, detail=f"Validation failed: {exc}")
     finally:

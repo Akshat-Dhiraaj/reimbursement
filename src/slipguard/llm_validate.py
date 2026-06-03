@@ -246,15 +246,29 @@ def load_local_env() -> None:
         pass
 
 
-def resolve_provider(provider: str = "auto") -> str:
-    """Pick the provider: explicit name, else Gemini if its key is set, else Groq."""
+def _provider_chain(provider: str = "auto") -> list[str]:
+    """Ordered providers to try. An explicit name → just that one. ``auto`` → the configured
+    providers **Groq first** (~200 calls/day free + multi-key fallback), then **Gemini** (20/day),
+    then **LM Studio** only if ``LMSTUDIO_MODEL`` is set — so a single exhausted provider FALLS BACK
+    to the next instead of hard-failing."""
     if provider and provider != "auto":
-        return provider
+        return [provider]
+    chain: list[str] = []
+    if _numbered_keys("GROQ_API_KEY"):
+        chain.append("groq")
     if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
-        return "gemini"
-    if os.environ.get("GROQ_API_KEY"):
-        return "groq"
-    raise RuntimeError("no API key set — export GROQ_API_KEY or GEMINI_API_KEY / GOOGLE_API_KEY")
+        chain.append("gemini")
+    if os.environ.get("LMSTUDIO_MODEL"):          # opt-in local fallback (don't assume a server is up)
+        chain.append("lmstudio")
+    if not chain:
+        raise RuntimeError("no API key set — export GROQ_API_KEY or GEMINI_API_KEY / GOOGLE_API_KEY "
+                           "(or use --provider lmstudio for a local model)")
+    return chain
+
+
+def resolve_provider(provider: str = "auto") -> str:
+    """The single provider to use — the first of the fallback chain (see :func:`_provider_chain`)."""
+    return _provider_chain(provider)[0]
 
 
 # --- deterministic cross-check (the refinement: don't trust the LLM's self-judged math) ------
@@ -323,12 +337,34 @@ def validate(path: str, *, provider: str = "auto", prompt_path: Optional[str] = 
     Adds `_provider` / `_path` for traceability, fails safe to `decision="review"` if the model
     didn't return one, and keeps a `_raw` snippet when the reply wasn't parseable JSON. With
     ``cross_check`` (default), :func:`reconcile` overrules the decision to the stricter of the LLM's
-    and the deterministic detectors' (run on the model's own numbers) — never relaxing it."""
+    and the deterministic detectors' (run on the model's own numbers) — never relaxing it.
+
+    In ``auto`` mode it tries the providers in order (Groq → Gemini → optional LM Studio) and FALLS
+    BACK to the next when one is rate-limited / exhausted (429/503), so a single depleted provider
+    doesn't hard-fail."""
     prompt = load_prompt(prompt_path)
-    prov = resolve_provider(provider)
-    parts = _parts_for(path, prov)
-    caller = {"gemini": _call_gemini, "lmstudio": _call_lmstudio}.get(prov, _call_groq)
-    text = caller(prompt, parts, model)
+    chain = _provider_chain(provider)
+    text: Optional[str] = None
+    prov, last_err = chain[0], None
+    for i, p in enumerate(chain):
+        is_last = i == len(chain) - 1
+        try:
+            parts = _parts_for(path, p)
+            caller = {"gemini": _call_gemini, "lmstudio": _call_lmstudio}.get(p, _call_groq)
+            text, prov = caller(prompt, parts, model), p
+            break
+        except urllib.error.HTTPError as e:          # rate-limited / exhausted → try the next provider
+            last_err = e
+            if e.code in (429, 503) and not is_last:
+                continue
+            raise
+        except (RuntimeError, KeyError) as e:         # provider misconfigured → skip if another remains
+            last_err = e
+            if not is_last:
+                continue
+            raise
+    if text is None:                                  # pragma: no cover - loop returns or raises above
+        raise last_err
 
     verdict = _parse_json_object(text) or {}
     if "decision" not in verdict:

@@ -42,6 +42,7 @@ export default function App() {
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
   const [fileName, setFileName] = useState('')
+  const [lastFile, setLastFile] = useState(null)
   const [dragging, setDragging] = useState(false)
   const [health, setHealth] = useState(null)
   const inputRef = useRef(null)
@@ -59,6 +60,7 @@ export default function App() {
     setError('')
     setResult(null)
     setFileName(file.name)
+    setLastFile(file)            // remember it so "Try again" can re-submit the same file
     setStatus('loading')
     try {
       const body = new FormData()
@@ -134,7 +136,10 @@ export default function App() {
       {status === 'error' && (
         <div className="banner bad">
           <strong>Couldn’t validate.</strong> {error}
-          <button className="ghost" onClick={reset}>Try again</button>
+          <button className="ghost" onClick={() => (lastFile ? submit(lastFile) : reset())}>
+            Try again
+          </button>
+          <button className="ghost" onClick={reset}>Upload another</button>
         </div>
       )}
 

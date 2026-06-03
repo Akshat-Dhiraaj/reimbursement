@@ -47,7 +47,7 @@ never the gate**.
 | Layer | Status | Evidence |
 |---|---|---|
 | Domain models + pluggable detector framework | ✅ Done | `models.py`, `detectors/base.py` |
-| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 261 tests; synthetic leaderboard |
+| Deterministic detectors (`arithmetic`, `tax_id`, `date_sanity`, `duplicate`) | ✅ Done | 263 tests; synthetic leaderboard |
 | **Simple LLM-judge pipeline** (alt: image/PDF → Groq / Gemini / **local LM Studio** → verdict) | ✅ Done | `slipguard validate <file>`; prompt in `prompts/validity_prompt.md`, refined by measured `eval-prompt` |
 | **Web UI** (drag-and-drop a receipt → Approved / Not approved + reasons) | ✅ Done | FastAPI `src/slipguard/web/` + React `frontend/`; `slipguard serve` |
 | **Per-task paradigm comparison** (pure-Python vs local-model vs API) | ✅ Done — measured | [SCORECARD.md](SCORECARD.md) |
@@ -78,7 +78,7 @@ pip install -e ".[dev]"
 #   pip install -e ".[c2pa]"  # C2PA / Content Credentials reader for image_meta (MIT/Apache) — CPU-only but ~260 MB
 #   pip install -e ".[web]"   # FastAPI web UI backend for the React drag-and-drop frontend (MIT/BSD/Apache) — light
 
-python -m pytest                  # 261 tests
+python -m pytest                  # 263 tests
 slipguard eval                    # synthetic structured benchmark leaderboard
 slipguard eval-pdf                # synthetic PDF-provenance leaderboard
 slipguard eval-pdf-forensics      # compressed-PDF deep forensics: byte-only vs pikepdf recall (needs [pdf-forensics])
@@ -262,7 +262,7 @@ src/slipguard/
 prompts/
   validity_prompt.md  editable instructions for the `validate` pipeline (AI-edit/date/arithmetic/vendor checks)
 frontend/          React (Vite) drag-and-drop UI -> /api/validate; `npm run dev` (proxy :8000) or `npm run build` -> served by `slipguard serve`
-tests/             261 tests
+tests/             263 tests
 ```
 
 ## 7. Licence posture (summary)

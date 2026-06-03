@@ -106,3 +106,15 @@ def test_validate_surfaces_missing_key_as_503(client, monkeypatch):
     r = client.post("/api/validate",
                     files={"file": ("r.png", b"\x89PNG\r\n", "image/png")})
     assert r.status_code == 503
+
+
+def test_validate_maps_all_keys_exhausted_to_429(client, monkeypatch):
+    import urllib.error
+
+    def _exhausted(path, provider="auto"):           # the provider/key chain raised its final 429
+        raise urllib.error.HTTPError("u", 429, "rate limit", {}, None)
+
+    monkeypatch.setattr(api, "validate", _exhausted)
+    r = client.post("/api/validate", files={"file": ("r.png", b"\x89PNG\r\n", "image/png")})
+    assert r.status_code == 429
+    assert "rate-limited" in r.json()["detail"].lower()   # clean message, not a raw HTTP error
