@@ -123,8 +123,13 @@ def cmd_eval(args: argparse.Namespace) -> None:
     print(report)
 
 
+def _workdir(args: argparse.Namespace, name: str) -> str:
+    """Where a benchmark writes its synthetic corpus: ``--workdir`` if given, else artifacts/<name>."""
+    return args.workdir or os.path.join("artifacts", name)
+
+
 def cmd_eval_pdf(args: argparse.Namespace) -> None:
-    workdir = args.workdir or os.path.join("artifacts", "pdf_bench")
+    workdir = _workdir(args, "pdf_bench")
     dataset = generate_pdf(
         n_clean=args.n_clean, fraud_per_type=args.fraud_per_type,
         seed=args.seed, workdir=workdir,
@@ -145,7 +150,7 @@ def cmd_eval_pdf_forensics(args: argparse.Namespace) -> None:
     if not ok:
         raise SystemExit(f'the [pdf-forensics] extra is required: {why}\n'
                          '  pip install -e ".[pdf-forensics]"')
-    workdir = args.workdir or os.path.join("artifacts", "pdf_forensics_bench")
+    workdir = _workdir(args, "pdf_forensics_bench")
     dataset = generate_pdf_deep(
         n_clean=args.n_clean, fraud_per_type=args.fraud_per_type,
         seed=args.seed, workdir=workdir,
@@ -177,7 +182,7 @@ def _fmt_pct(x: float) -> str:
 def cmd_eval_image(args: argparse.Namespace) -> None:
     if not pillow_available():
         raise SystemExit('Pillow is required to mint the image benchmark — pip install -e ".[vlm]"')
-    workdir = args.workdir or os.path.join("artifacts", "image_bench")
+    workdir = _workdir(args, "image_bench")
     dataset = generate_image(
         n_clean=args.n_clean, fraud_per_type=args.fraud_per_type,
         seed=args.seed, workdir=workdir,
@@ -187,9 +192,11 @@ def cmd_eval_image(args: argparse.Namespace) -> None:
 
 
 def _detectors_for_audit(today: Optional[Date]) -> list[Detector]:
-    """Canonical detector set, with date_sanity pinned to ``today`` when given so
-    the 2018-2019 corpus era can be controlled (otherwise every old receipt trips
-    the 'very old' check as a dataset artefact, not fraud)."""
+    """Canonical detector set, with date_sanity pinned to ``today`` when given (for
+    deterministic audits). Under the 60-day reimbursement window this only keeps date_sanity
+    quiet when *every* receipt is within 60 days of ``today`` — an aged multi-year corpus is
+    still flagged out-of-policy (correct, not an artefact). To isolate the non-date detectors'
+    FP on such a corpus, drop date_sanity (as the fusion audit does)."""
     dets = default_detectors()
     if today is None:
         return dets
@@ -305,6 +312,28 @@ def _oracle_truths(args: argparse.Namespace) -> list:
     return truths[: args.limit] if args.limit else truths
 
 
+def _runnable_or_exit(candidates: list, route_label: str, install_hint: str) -> list:
+    """Keep only the extractors that can actually run here (printing a skip reason for each that
+    can't); exit cleanly if none remain. Shared by eval-extract / eval-pdf-extract."""
+    runnable = []
+    for ex in candidates:
+        ok, why = ex.available()
+        if ok:
+            runnable.append(ex)
+        else:
+            print(f"skipping {ex.name}: {why}")
+    if not runnable:
+        raise SystemExit(f"no {route_label}-route extractor is runnable here (see skip reasons "
+                         f"above). {install_hint}, then re-run.")
+    return runnable
+
+
+def _print_reports(reports) -> None:
+    for report in reports:
+        print(report)
+        print()
+
+
 def cmd_eval_extract(args: argparse.Namespace) -> None:
     truths = _oracle_truths(args)
     # --extractor scores ONE extractor (e.g. `groq`, to spend API quota only on it); the
@@ -313,42 +342,20 @@ def cmd_eval_extract(args: argparse.Namespace) -> None:
             else image_extractors(args.model))
     candidates = [e for e in pool if e.can_handle(DocumentType.IMAGE)]
 
-    runnable = []
-    for ex in candidates:
-        ok, why = ex.available()
-        (runnable.append(ex) if ok else print(f"skipping {ex.name}: {why}"))
-    if not runnable:
-        raise SystemExit(
-            "no IMAGE-route extractor is runnable here (see skip reasons above). "
-            'Install one, e.g. pip install -e ".[vlm]", then re-run.'
-        )
-
+    runnable = _runnable_or_exit(candidates, "IMAGE", 'Install one, e.g. pip install -e ".[vlm]"')
     print(f"Ground truth: {len(truths)} {args.corpus} oracle receipts ({args.split} split)\n")
-    for report in evaluate_extractors(runnable, truths):
-        print(report)
-        print()
+    _print_reports(evaluate_extractors(runnable, truths))
 
 
 def cmd_eval_pdf_extract(args: argparse.Namespace) -> None:
-    workdir = args.workdir or os.path.join("artifacts", "pdf_extract_bench")
+    workdir = _workdir(args, "pdf_extract_bench")
     truths = generate_pdf_extraction(n=args.n, seed=args.seed, workdir=workdir)
     candidates = [e for e in pdf_extractors() if e.can_handle(DocumentType.PDF)]
 
-    runnable = []
-    for ex in candidates:
-        ok, why = ex.available()
-        (runnable.append(ex) if ok else print(f"skipping {ex.name}: {why}"))
-    if not runnable:
-        raise SystemExit(
-            "no PDF-route extractor is runnable here (see skip reasons above). "
-            'Install one: pip install -e ".[pdf]", then re-run.'
-        )
-
+    runnable = _runnable_or_exit(candidates, "PDF", 'Install one: pip install -e ".[pdf]"')
     print(f"(wrote {len(truths)} synthetic born-digital PDFs to {workdir})")
     print(f"Ground truth: {len(truths)} synthetic receipts\n")
-    for report in evaluate_extractors(runnable, truths):
-        print(report)
-        print()
+    _print_reports(evaluate_extractors(runnable, truths))
 
 
 def cmd_eval_calibration(args: argparse.Namespace) -> None:
@@ -442,6 +449,30 @@ def cmd_eval_prompt(args: argparse.Namespace) -> None:
         for r in ranked:
             print(f"  {_fmt_pct(r.overall)}  {r.name}")
         print(f"\n=> most accurate: {ranked[0].name} (field macro {_fmt_pct(ranked[0].overall)})")
+
+
+def cmd_make_fakes(args: argparse.Namespace) -> None:
+    # Generate fraud-positive test receipts from real ones (the corpora are legitimate-only).
+    # pytamper = pure-Python Pillow overlay (free/local); gemini = Nano Banana image edits (API);
+    # local = diffusion (GPU). Each method writes its own folder so they can be compared separately.
+    out = args.out or os.path.join("fakes", args.method)
+    try:
+        if args.method == "pytamper":
+            from .data.tamper import make_pytamper
+            made = make_pytamper(args.src, out, limit=args.limit)
+        elif args.method == "gemini":
+            from .data.tamper_ai import make_gemini
+            made = make_gemini(args.src, out, limit=args.limit, model=args.model)
+        else:  # local
+            from .data.tamper_ai import make_local
+            made = make_local(args.src, out, limit=args.limit, model=args.model)
+    except RuntimeError as e:          # e.g. image quota exhausted — show cleanly, no traceback
+        raise SystemExit(str(e))
+    print(f"wrote {len(made)} fake receipts to {out}/")
+    for p in made[:8]:
+        print(f"  {p}")
+    if len(made) > 8:
+        print(f"  ... (+{len(made) - 8} more)")
 
 
 def cmd_score(args: argparse.Namespace) -> None:
@@ -612,6 +643,17 @@ def build_parser() -> argparse.ArgumentParser:
     pep.add_argument("--model", default=None, help="override the model id")
     pep.set_defaults(func=cmd_eval_prompt)
 
+    pmf = sub.add_parser("make-fakes",
+                         help="generate tampered/fake receipts from real ones (fraud positives for testing)")
+    pmf.add_argument("--method", default="pytamper", choices=("pytamper", "gemini", "local"),
+                     help="pytamper: Pillow overlay (free/local); gemini: Nano Banana image edits "
+                          "(API); local: diffusion (GPU)")
+    pmf.add_argument("--src", default="samples", help="folder of real receipt images (default: samples)")
+    pmf.add_argument("--out", default=None, help="output folder (default: fakes/<method>)")
+    pmf.add_argument("--limit", type=int, default=None, help="only the first N source images")
+    pmf.add_argument("--model", default=None, help="model id for the gemini / local methods")
+    pmf.set_defaults(func=cmd_make_fakes)
+
     ps = sub.add_parser("score", help="score a single receipt JSON")
     ps.add_argument("path")
     ps.set_defaults(func=cmd_score)
@@ -620,7 +662,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="SIMPLE LLM-judge validity check on one image/PDF via Groq/Gemini")
     pv.add_argument("path", help="receipt image or PDF")
     pv.add_argument("--provider", default="auto", choices=("auto", "groq", "gemini", "lmstudio"),
-                    help="auto: Gemini if its key is set, else Groq")
+                    help="auto: Groq first, then Gemini, then LM Studio if configured")
     pv.add_argument("--prompt", default=None,
                     help="instruction file (default: prompts/validity_prompt.md)")
     pv.add_argument("--model", default=None, help="override the model id")

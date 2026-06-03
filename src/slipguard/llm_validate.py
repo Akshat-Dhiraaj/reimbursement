@@ -66,7 +66,8 @@ def _image_part(path: str, max_side: int = 1600) -> tuple[bytes, str]:
         import io
 
         from PIL import Image
-        im = Image.open(path).convert("RGB")
+        with Image.open(path) as im0:
+            im = im0.convert("RGB")          # close the file handle; convert() returns a new image
         w, h = im.size
         if max(w, h) > max_side:
             s = max_side / max(w, h)
@@ -129,7 +130,10 @@ def _post_json(url: str, body: dict, headers: dict, timeout: float = 90.0, retri
         except urllib.error.HTTPError as e:
             if e.code in (429, 503) and attempt < retries:
                 ra = e.headers.get("retry-after")
-                wait = float(ra) if ra and ra.replace(".", "").isdigit() else delay
+                try:                                   # delta-seconds; non-numeric (HTTP-date) -> our backoff
+                    wait = max(0.0, float(ra)) if ra else delay
+                except (TypeError, ValueError):
+                    wait = delay
                 time.sleep(min(wait, _MAX_BACKOFF))   # cap: ride out per-minute throttling, not a daily reset
                 delay *= 2
                 continue
@@ -246,6 +250,9 @@ def load_local_env() -> None:
         pass
 
 
+PROVIDERS = ("auto", "groq", "gemini", "lmstudio")  # accepted by validate() — shared by the CLI + web API
+
+
 def _provider_chain(provider: str = "auto") -> list[str]:
     """Ordered providers to try. An explicit name → just that one. ``auto`` → the configured
     providers **Groq first** (~200 calls/day free + multi-key fallback), then **Gemini** (20/day),
@@ -322,11 +329,27 @@ def reconcile(verdict: dict, path: str) -> dict:
     are absent); this patches the measured 'confident arithmetic misread' weakness for free."""
     from .detectors import default_detectors
     from .fusion import Fuser
-    det = Fuser().verdict(path, [d.run(_verdict_to_receipt(verdict, path)) for d in default_detectors()])
+    fuser = Fuser()
+    signals = [d.run(_verdict_to_receipt(verdict, path)) for d in default_detectors()]
+    det = fuser.verdict(path, signals)
     llm_decision = verdict.get("decision", "review")
     verdict["llm_decision"] = llm_decision
     verdict["deterministic_decision"] = det.decision.value
     verdict["deterministic_reasons"] = list(det.reasons)
+    # Per-detector score x weight breakdown, so the UI can show HOW the risk was reached:
+    # each detector's fraud score, its weight (confidence; 0 = abstained), and the weighted
+    # contribution that the noisy-OR fuses into the final risk (review >= 0.4, reject >= 0.85).
+    verdict["_breakdown"] = {
+        "risk_score": round(det.risk_score, 3),
+        "review_at": fuser.review_threshold,
+        "reject_at": fuser.reject_threshold,
+        "signals": [
+            {"detector": s.detector, "score": round(s.score, 3), "weight": round(s.confidence, 3),
+             "contribution": round(s.weighted, 3), "abstained": s.abstained,
+             "reason": (s.reasons[0] if s.reasons else "")}
+            for s in signals
+        ],
+    }
     verdict["decision"] = _worst(llm_decision, det.decision.value)
     return verdict
 
@@ -358,7 +381,12 @@ def validate(path: str, *, provider: str = "auto", prompt_path: Optional[str] = 
             if e.code in (429, 503) and not is_last:
                 continue
             raise
-        except (RuntimeError, KeyError) as e:         # provider misconfigured → skip if another remains
+        except urllib.error.URLError as e:           # network / DNS / timeout (no HTTP status) → next provider
+            last_err = e
+            if not is_last:
+                continue
+            raise
+        except (RuntimeError, KeyError, IndexError) as e:  # misconfigured / unusable reply → skip if another remains
             last_err = e
             if not is_last:
                 continue

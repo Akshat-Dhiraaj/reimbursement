@@ -25,46 +25,24 @@ scalar-logprob signal. Honest, not hidden.
 from __future__ import annotations
 
 import base64
-import json
 import os
-import time
-import urllib.error
-import urllib.request
 from typing import Optional
 
+# Reuse the validate pipeline's HTTP plumbing — one POST-with-backoff, one image loader, one
+# Cloudflare-passing browser UA — so this hosted-Groq path can't drift from it and inherits the
+# _MAX_BACKOFF cap + safe retry-after parsing for free (DRY).
+from ..llm_validate import _GROQ_URL, _UA, _image_part, _post_json
 from ..models import DocumentType, Receipt
 from .base import Extractor
 from .vlm_qwen import _PROMPT, _parse_json_object, _to_receipt
 
 _DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-_BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
-#: Groq is fronted by Cloudflare, which blocks default urllib / datacenter client
-#: signatures with error 1010; a browser UA passes. Harmless from a residential IP.
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-_MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-         ".webp": "image/webp", ".gif": "image/gif"}
 
 
 def _data_url(path: str, max_side: int = 1280) -> str:
     """Read an image to a base64 data URL, downscaling large images when Pillow is present
     (a smaller payload, well under Groq's request cap); falls back to the raw file bytes."""
-    mime = _MIME.get(os.path.splitext(path)[1].lower(), "image/jpeg")
-    try:
-        import io
-
-        from PIL import Image
-        img = Image.open(path).convert("RGB")
-        w, h = img.size
-        if max(w, h) > max_side:
-            s = max_side / max(w, h)
-            img = img.resize((max(1, int(w * s)), max(1, int(h * s))))
-        buf = io.BytesIO()
-        img.save(buf, "JPEG")
-        raw, mime = buf.getvalue(), "image/jpeg"
-    except Exception:
-        with open(path, "rb") as fh:
-            raw = fh.read()
+    raw, mime = _image_part(path, max_side)
     return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
 
 
@@ -90,7 +68,9 @@ class GroqVLExtractor(Extractor):
         return True, ""
 
     def _call(self, data_url: str) -> str:
-        body = json.dumps({
+        # Shared POST-with-backoff (429/503, capped) — the same plumbing the validate pipeline
+        # uses, so the free-tier throttling behaviour can't diverge between the two Groq callers.
+        body = {
             "model": self.model_id,
             "temperature": 0,
             "max_tokens": self.max_tokens,
@@ -98,31 +78,14 @@ class GroqVLExtractor(Extractor):
                 {"type": "text", "text": _PROMPT},
                 {"type": "image_url", "image_url": {"url": data_url}},
             ]}],
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            _BASE_URL, data=body, method="POST",
-            headers={
-                "Authorization": "Bearer " + os.environ["GROQ_API_KEY"],
-                "Content-Type": "application/json",
-                "User-Agent": _UA,
-            },
+        }
+        out = _post_json(
+            _GROQ_URL, body,
+            {"Authorization": "Bearer " + os.environ["GROQ_API_KEY"],
+             "Content-Type": "application/json", "User-Agent": _UA},
+            timeout=self.timeout, retries=self.max_retries,
         )
-        # Retry on 429 (free-tier rate limits a batch of rapid calls) with backoff,
-        # honouring a Retry-After header when present — so a benchmark isn't dominated by
-        # throttling. This is itself a measured property of the API paradigm (#80).
-        delay = 2.0
-        for attempt in range(self.max_retries + 1):
-            try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    out = json.loads(resp.read().decode("utf-8"))
-                return out["choices"][0]["message"]["content"]
-            except urllib.error.HTTPError as e:
-                if e.code == 429 and attempt < self.max_retries:
-                    ra = e.headers.get("retry-after")
-                    time.sleep(float(ra) if ra and ra.replace(".", "").isdigit() else delay)
-                    delay *= 2
-                    continue
-                raise
+        return out["choices"][0]["message"]["content"]
 
     def extract(self, path: str, doc_id: Optional[str] = None) -> Receipt:
         text = self._call(_data_url(path))

@@ -26,11 +26,10 @@ from typing import Optional
 
 from .eval.extraction import _MONEY_FIELDS, _money_ok, _vendor_ok, evaluate_extractor
 from .extractors.base import Extractor
+from .llm_validate import _UA  # same Cloudflare-passing browser UA the Groq callers use (DRY)
 from .models import DocumentType, LineItem, Receipt
 
 _GROQ_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
 def make_lm(max_tokens: int = 1024):
@@ -125,7 +124,7 @@ def _metric(example, pred, trace=None) -> bool:
         subtotal=_num(getattr(example, "subtotal", None)),
         tax_amount=_num(getattr(example, "tax", None)),
         total=_num(getattr(example, "total", None)),
-        line_items=[LineItem("i", 1, 0, 0)] * int(getattr(example, "line_count", 0) or 0),
+        line_items=[LineItem("i", 1, 0, 0) for _ in range(int(getattr(example, "line_count", 0) or 0))],
     )
     return receipt_field_score(gold, pred_to_receipt(pred, "p", "")) >= 0.6
 

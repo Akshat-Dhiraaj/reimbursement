@@ -99,6 +99,31 @@ apps that move them, so lightweight *metadata/pixel* forensics on the IMAGE rout
 or FP-prone. The signals that survive are **content** (arithmetic, duplicate) and **cryptographic
 provenance when present** (C2PA) — exactly where the pipeline already leads.
 
+## End-to-end fraud test: 100% recall, but an extraction-misread FP (measured)
+
+Generated tampered receipts (`make-fakes --method pytamper` — Pillow overlays of an inflated total /
+future date on the real `samples/`) and ran the full `validate` pipeline on **30 fakes + 15 clean**
+(Groq):
+
+- **Recall 30/30 (100%)** — every forgery flagged (caveat: crude, *obvious* overlays inflate this).
+- **False-positive 6/15 (40%)** on the genuine receipts — diagnosed by the per-detector score
+  breakdown into two **deterministic** causes (the LLM approved all 15):
+  - **old test dates** — the WildReceipt images are 2012–2017, so `date_sanity` flags all of them.
+    Under the **60-day window** (2-month reimbursement policy) this is *correct* — those receipts are
+    out of policy, not a false positive; recent receipts wouldn't trip it.
+  - **extraction misreads** — the model invents a phantom service-charge or misreads a digit, so the
+    deterministic `arithmetic` *correctly* flags numbers that don't reconcile. The receipt is genuine;
+    the *reading* was wrong.
+
+This re-confirms the through-line: **the binding constraint is extraction quality, not detection
+logic.** The arithmetic detector is right; it's fed a misread. The fix is better extraction (or wiring
+a per-field confidence so the abstain guard arms on the LLM path), not more detectors.
+
+*Generating realistic AI forgeries is itself blocked at the source:* ChatGPT and Gemini **refuse** to
+edit a receipt's amount/date (content policy), so real AI forgeries come from local diffusion models or
+manual editing — which carry **no C2PA/SynthID provenance** and are pixel-seamless. → content checks
+(arithmetic/date/duplicate) remain the only robust catch; pixel/provenance AI-detection stays a gap.
+
 ## Recommended shape: a cascade, not a winner
 
 The answer is not "one paradigm" — it is **routing each task to its cheapest sufficient tier**:

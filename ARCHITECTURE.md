@@ -24,7 +24,7 @@ flowchart TD
     subgraph DET[Detectors -- each emits one Signal]
       D1[arithmetic<br/>field reconciliation]
       D2[tax_id<br/>GSTIN/VAT checksum]
-      D3[date_sanity<br/>future / very old]
+      D3[date_sanity<br/>future / out-of-window 60d]
       D4[duplicate<br/>resubmission match]
       D5[pdf_meta<br/>PDF provenance]
       D6[image_meta<br/>image EXIF + C2PA provenance]
@@ -323,7 +323,7 @@ src/slipguard/
     base.py               Detector ABC (applicable/prime/score/run/_abstain)
     arithmetic.py         line items -> subtotal -> tax -> total reconciliation (total = sub+tax+service-discount; accepts tax-inclusive lines)
     taxid.py              python-stdnum GSTIN (IN) + EU VAT; abstains if unsupported
-    datesanity.py         future / implausibly-old dates (today injectable)
+    datesanity.py         future dates + out-of-window (older than the reimbursement window, default 60d ~ 2 months); today injectable
     duplicate.py          exact + fuzzy resubmission match; prime()-d with history
     pdfmeta.py            PDF provenance signal: incremental/+/Prev content-edit/+signature coverage/editor/date/structural (byte inspect_pdf + pikepdf inspect_pdf_deep; use_deep knob; disjoint accounting)
     imagemeta.py          image provenance signal: C2PA Content Credentials (AI-gen) + EXIF editor/date (forensics.c2pa + forensics.image); abstains only when neither present
@@ -336,6 +336,7 @@ src/slipguard/
     synth.py              synthetic structured clean+fraud generator
     pdfsynth.py           synthetic PDF generator: byte-layout tampers, minted text PDFs (extraction oracle), compressed deep-forensics corpus
     imagesynth.py         synthetic image generator (real EXIF JPEGs) + 2 provenance tampers
+    tamper.py / tamper_ai.py  make-fakes: turn REAL receipts into fraud positives — Pillow overlay (pytamper, free/local) | Gemini "Nano Banana" image edits | local diffusion (gated)
     wildreceipt.py        WildReceipt loader: KIE annotations -> Receipt (oracle, no OCR; US English)
     cord.py               CORD loader (CC-BY-4.0): gt_parse -> Receipt (2nd oracle; Indonesian/IDR, no vendor/date); pure mapping + lazy `datasets` fetch
     expressexpense.py     ExpressExpense loader (MIT): globs 200 receipt images, no labels -> image-only Receipts (re-extraction FP audit only)
@@ -350,7 +351,7 @@ src/slipguard/
   web/
     api.py                FastAPI backend: POST /api/validate (wraps validate, shapes Approved/Not-approved + reasons) + GET /api/health; serves frontend/dist (the [web] extra)
 frontend/                 React (Vite) drag-and-drop UI: drop a receipt -> Approved / Not approved + reasons; dev proxies /api to :8000, `npm run build` is served by `slipguard serve`
-tests/                    263 tests
+tests/                    268 tests
 ```
 
 ---

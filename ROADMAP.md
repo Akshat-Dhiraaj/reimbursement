@@ -80,7 +80,7 @@ Status as of 2026-06-02. Rationale for the choices below lives in
 - Evidence: image benchmark (70 samples) — `image_meta` AUC 1.0 / recall 1.0 / 0 FP
   over 30 EXIF-provenance tampers (editor tag + capture/modify gap); the structured
   detectors and `pdf_meta` correctly abstain on the IMAGE route.
-- **263 tests pass** (full suite, all milestones; +4 for Groq multi-key + cross-provider auto-fallback + web all-keys-exhausted 429, +6 for the prompt-eval harness + LM Studio local provider + backoff-cap/fail-fast (#92–97), +8 for the FastAPI web UI backend (#86–91: shaping + endpoints, offline), +5 for the validate deterministic cross-check (#85), +5 for the DSPy optimizer offline tests (#84), +6 for the simple LLM-judge `validate` pipeline (#83), +11 for learned fusion (#62), +5 for the
+- **268 tests pass** (full suite, all milestones; +1 for the UI score breakdown, +4 for the fake-receipt generators (make-fakes #102–104), +4 for Groq multi-key + cross-provider auto-fallback + web all-keys-exhausted 429, +6 for the prompt-eval harness + LM Studio local provider + backoff-cap/fail-fast (#92–97), +8 for the FastAPI web UI backend (#86–91: shaping + endpoints, offline), +5 for the validate deterministic cross-check (#85), +5 for the DSPy optimizer offline tests (#84), +6 for the simple LLM-judge `validate` pipeline (#83), +11 for learned fusion (#62), +5 for the
   richer `Receipt` model (#81: service-charge/discount/tax-inclusive arithmetic), and +26 for
   lightweight forensics (#71/#72/#76) — the logistic fit / pluggable combiner / down-weights-a-noisy-
   detector + `compare_fusion` smoke, plus the PDF `/Prev` content-edit & signature-coverage
@@ -366,8 +366,10 @@ cleaner signal that even a reweighting fuser can't recover.
   holds). The `[pdf-forensics]` extra (pikepdf, Layer 2) recovers those and adds structural
   flags — but **without it installed, compressed PDFs still read blind** (recall 0 on
   compressed-metadata frauds). Installing the extra is the fix; it is optional by design.
-- **Date-era artifact:** on the 2010–2019 WildReceipt corpus, `date_sanity`'s
-  "very old" check fires as a dataset artifact; use `eval-real --today` to control it.
+- **Date window = 60 days (2-month reimbursement policy).** `date_sanity` flags any receipt older
+  than that (out of policy), so on the 2010–2019 WildReceipt corpus it now fires on *every* receipt
+  — correct per policy, but it means the old-corpus FP audit must use *recent* receipts (or disable
+  `date_sanity`) to isolate the arithmetic FP. (`--today` no longer rescues a multi-year-old corpus.)
 - **Duplicate audit mode:** the FP audit primes `duplicate` with empty history (each
   receipt judged independently); cross-receipt near-duplicate collisions among
   distinct legitimate receipts are a separate measurement, not yet run.

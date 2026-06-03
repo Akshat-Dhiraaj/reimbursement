@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import random
 from datetime import date as Date
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
 
 from ..models import DocumentType, FraudType, LabeledSample, Receipt
+from ._common import (VENDOR_NAMES, event_datetime, image_or_pdf_receipt,
+                      mismatched_modified)
 from .synth import Dataset
 
 # (Make, Model) pairs for genuine phone captures.
@@ -40,7 +42,6 @@ _EDITOR_SOFTWARE = [
     "Adobe Photoshop 24.1 (Windows)", "GIMP 2.10.34", "Snapseed 2.21",
     "Pixelmator Pro 3.3", "PicsArt 23.1.0", "Canva", "Photopea 1.0",
 ]
-_VENDORS = ["Reliance Fresh", "Croma", "Apollo Pharmacy", "Cafe Coffee Day", "Big Bazaar"]
 
 
 def _exif_dt(dt: datetime) -> str:
@@ -76,19 +77,12 @@ def _write_image(workdir: Path, doc_id: str, exif) -> Path:
 
 
 def _receipt(rng: random.Random, doc_id: str, path: Path, today: Date) -> Receipt:
-    return Receipt(
-        doc_id=doc_id,
-        vendor_name=rng.choice(_VENDORS),
-        date=today - timedelta(days=rng.randint(1, 180)),
-        source=DocumentType.IMAGE,
-        source_path=str(path),
-        image_path=str(path),
-    )
+    return image_or_pdf_receipt(rng, doc_id, path, today,
+                                source=DocumentType.IMAGE, image_path=str(path))
 
 
 def _captured_at(rng: random.Random, today: Date) -> datetime:
-    day = today - timedelta(days=rng.randint(1, 180))
-    return datetime(day.year, day.month, day.day, rng.randint(8, 20), rng.randint(0, 59))
+    return event_datetime(rng, today)
 
 
 def generate_image(
@@ -134,11 +128,11 @@ def generate_image(
     for _ in range(fraud_per_type):
         captured = _captured_at(rng, today)
         make_, model = rng.choice(_CAMERAS)
-        modified = captured + timedelta(days=rng.randint(15, 400))
+        modified, gap = mismatched_modified(rng, captured)
         # date mismatch is the only defect: a camera (non-editor) Software tag
         exif = _build_exif(rng.choice(_CAMERA_SOFTWARE), make_, model, captured, modified)
         make(True, {FraudType.METADATA}, exif,
-             {"mode": "date_mismatch", "gap_days": (modified - captured).days})
+             {"mode": "date_mismatch", "gap_days": gap})
 
     rng.shuffle(samples)
     return Dataset(history=[], samples=samples)

@@ -27,11 +27,10 @@ field-*labelling* confidence (did we pick the right line as "total").
 
 from __future__ import annotations
 
-import importlib.util
 from typing import Optional
 
 from ..models import DocumentType, Receipt
-from .base import Extractor
+from .base import Extractor, importable
 from .kie import Line, receipt_from_lines
 
 
@@ -114,7 +113,7 @@ class DocTROCRExtractor(Extractor):
     def available(self) -> tuple[bool, str]:
         # Probe with find_spec only — never import doctr/torch here, so this stays fast
         # (the unit suite calls it) and no OCR weights are loaded.
-        missing = [m for m in ("doctr", "torch", "torchvision") if not _importable(m)]
+        missing = [m for m in ("doctr", "torch", "torchvision") if not importable(m)]
         if missing:
             return False, f"missing deps: {', '.join(missing)} — pip install python-doctr"
         return True, ""
@@ -136,7 +135,3 @@ class DocTROCRExtractor(Extractor):
         result = self._model(doc)
         lines = _lines_from_export(result.export())
         return _receipt_from_lines(lines, doc_id=doc_id or path, image_path=path)
-
-
-def _importable(module: str) -> bool:
-    return importlib.util.find_spec(module) is not None

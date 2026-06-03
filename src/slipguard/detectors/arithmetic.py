@@ -8,6 +8,7 @@ survives screenshots and recompression because it reads content, not artifacts.
 from __future__ import annotations
 
 from ..models import FraudType, Receipt, Signal
+from ..money import money_close
 from .base import Detector
 
 
@@ -23,14 +24,13 @@ class ArithmeticConsistencyDetector(Detector):
         self.min_confidence = min_confidence
 
     def _err(self, printed: float, expected: float) -> tuple[bool, float]:
-        # Tolerance = a flat floor (rounding noise on small amounts) OR a relative
-        # band (whichever is larger), so neither cent-level rounding nor large
-        # legitimate totals trip a false mismatch.
-        tol = max(self.abs_tol, self.rel_tol * abs(expected))
-        diff = abs(printed - expected)
-        # Second value is the *normalised* error used later to scale severity;
-        # max(1.0, ...) keeps a tiny `expected` from exploding the ratio.
-        return diff > tol, diff / max(1.0, abs(expected))
+        # "Equal within slack" defers to money.money_close, so the reconciliation tolerance
+        # (a flat floor OR a relative band, whichever is larger) means ONE thing across the
+        # detector, the extraction metric and calibration. The second value is the *normalised*
+        # error used later to scale severity; max(1.0, ...) keeps a tiny `expected` from
+        # exploding the ratio.
+        bad = not money_close(printed, expected, self.rel_tol, self.abs_tol)
+        return bad, abs(printed - expected) / max(1.0, abs(expected))
 
     def _extraction_confidence(self, r: Receipt) -> float:
         """Lowest extraction confidence among the money fields this detector reads.

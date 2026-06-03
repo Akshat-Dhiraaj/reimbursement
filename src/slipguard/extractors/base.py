@@ -14,10 +14,17 @@ reads it to abstain on a low-confidence misread instead of asserting fraud."""
 
 from __future__ import annotations
 
+import importlib.util
 from abc import ABC, abstractmethod
 from typing import Optional
 
 from ..models import DocumentType, Receipt
+
+
+def importable(module: str) -> bool:
+    """True if ``module`` can be imported, checked WITHOUT importing it — the cheap optional-dep
+    probe shared by the heavy extractors' ``available()`` checks (VLM / OCR / PDF-text)."""
+    return importlib.util.find_spec(module) is not None
 
 
 class Extractor(ABC):

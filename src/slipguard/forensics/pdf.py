@@ -198,12 +198,15 @@ def _objects_in_xref_body(body: str) -> set[int]:
         header = re.fullmatch(r"\s*(\d+)\s+(\d+)\s*", lines[i])
         if header:
             start, count = int(header.group(1)), int(header.group(2))
-            for k in range(count):
-                entry_line = lines[i + 1 + k] if i + 1 + k < len(lines) else ""
-                entry = re.fullmatch(r"\s*(\d{10})\s+(\d{5})\s+([nf])\s*", entry_line)
+            # Clamp to the lines actually present so a malformed/hostile header like
+            # "0 9999999999" can't spin a multi-billion-iteration loop (the module
+            # promises never to hang on malformed input).
+            real = min(count, max(0, len(lines) - (i + 1)))
+            for k in range(real):
+                entry = re.fullmatch(r"\s*(\d{10})\s+(\d{5})\s+([nf])\s*", lines[i + 1 + k])
                 if entry and entry.group(3) == "n" and (start + k) != 0:
                     objs.add(start + k)
-            i += count + 1
+            i += real + 1
         else:
             i += 1
     return objs

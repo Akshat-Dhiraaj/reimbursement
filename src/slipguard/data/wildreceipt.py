@@ -57,11 +57,12 @@ def _record_to_receipt(rec: dict, doc_id: str) -> Receipt:
 
     names = by_label.get(_STORE_NAME, [])
     items = by_label.get(_PROD_ITEM, [])
-    prices = [p for p in (_money(t) for t in by_label.get(_PROD_PRICE, [])) if p is not None]
-
+    # Pair each price with its positional item BEFORE dropping unparseable prices, so a
+    # price that fails to parse skips its own row instead of shifting every later name.
     line_items = [
         LineItem(items[i] if i < len(items) else "item", 1, price, price)
-        for i, price in enumerate(prices)
+        for i, price in enumerate(_money(t) for t in by_label.get(_PROD_PRICE, []))
+        if price is not None
     ]
 
     file_name = rec.get("file_name")

@@ -61,7 +61,7 @@ from typing import Any, Optional
 
 from ..models import DocumentType, LineItem, Receipt
 from ..money import parse_money
-from .base import Extractor
+from .base import Extractor, importable
 
 #: default checkpoint — Apache-2.0 AND fits an 8 GB GPU natively. (Qwen2.5-VL-3B has no
 #: clear commercial licence; the Apache-2.0 7B fits only with CPU offload.) See DECISIONS.md.
@@ -268,7 +268,7 @@ class QwenVLExtractor(Extractor):
     def available(self) -> tuple[bool, str]:
         # Probe with find_spec / metadata only — never import torch/transformers here,
         # so this stays fast (the unit-test suite calls it) and the model never loads.
-        missing = [m for m in ("torch", "transformers", "PIL") if not _importable(m)]
+        missing = [m for m in ("torch", "transformers", "PIL") if not importable(m)]
         if missing:
             return False, f"missing deps: {', '.join(missing)} — pip install -e \".[vlm]\""
         ver = _pkg_version("transformers")
@@ -366,12 +366,6 @@ class QwenVLExtractor(Extractor):
         receipt = _to_receipt(_parse_json_object(text) or {}, doc_id=doc_id or path, image_path=path)
         receipt.field_confidence.update(token_conf)  # scalar logprob conf rides alongside line_items
         return receipt
-
-
-def _importable(module: str) -> bool:
-    import importlib.util
-
-    return importlib.util.find_spec(module) is not None
 
 
 def _pkg_version(name: str) -> Optional[tuple[int, ...]]:

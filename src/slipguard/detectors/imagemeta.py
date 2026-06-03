@@ -22,7 +22,6 @@ never decides a verdict."""
 
 from __future__ import annotations
 
-from ..combine import noisy_or
 from ..forensics.c2pa import c2pa_available, inspect_c2pa
 from ..forensics.image import inspect_image, pillow_available
 from ..models import DocumentType, FraudType, Receipt, Signal
@@ -86,13 +85,10 @@ class ImageMetadataDetector(Detector):
                 if prov.date_gap_days is not None and prov.date_gap_days > self.max_date_gap_days:
                     parts.append((_DATE, f"modified {prov.date_gap_days:.0f}d after capture"))
 
-        # Corroborating provenance signals compound (same rule as the verdict fuser),
-        # capped below 1.0 so image metadata alone is never stated as certainty. A signed
-        # AI assertion is cryptographic, not heuristic -> firmer confidence than EXIF.
+        # Corroborating provenance signals compound (noisy-OR, capped below certainty) — a signed
+        # AI assertion is cryptographic, not heuristic -> firmer confidence than EXIF (see _fused).
         if parts:
-            risk = min(0.99, noisy_or(s for s, _ in parts))
-            return Signal(self.name, risk, 0.9 if c2pa_ai else 0.85,
-                          [r for _, r in parts], evidence)
+            return self._fused(parts, 0.9 if c2pa_ai else 0.85, evidence)
 
         if camera_signed:
             # a cryptographically-signed camera capture exonerates more firmly than a

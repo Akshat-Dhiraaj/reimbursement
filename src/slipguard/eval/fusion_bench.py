@@ -18,17 +18,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import timedelta
 from typing import Optional, Sequence
 
 from ..data.synth import Dataset
 from ..detectors import default_detectors
 from ..detectors.base import Detector
-from ..detectors.datesanity import DateSanityDetector
 from ..fusion import Fuser
 from ..fusion_learned import LearnedFuser, feature_names, feature_vector
 from ..models import Receipt, Signal
-from .metrics import roc_auc
+from .metrics import _fmt, roc_auc
 
 Row = tuple[list[Signal], bool]
 
@@ -45,18 +43,19 @@ def _signals_for(
 
 
 def _real_detectors(real: Sequence[Receipt]) -> list[Detector]:
-    """Canonical detectors, but with ``date_sanity`` pinned to the corpus era so a
-    2018-19 receipt judged against today's date isn't flagged 'very old' as a dataset
-    artefact (the same control ``eval-real --today`` applies). If the corpus carries
-    no dates, ``date_sanity`` abstains and the default set is fine."""
-    dates = [r.date for r in real if r.date is not None]
-    if not dates:
-        return default_detectors()
-    today = max(dates) + timedelta(days=365)
-    return [
-        DateSanityDetector(today=today) if d.name == "date_sanity" else d
-        for d in default_detectors()
-    ]
+    """Canonical detectors **minus ``date_sanity``** for the real-corpus fusion audit.
+
+    Real corpora (CORD / ExpressExpense, 2018-2019) predate the 60-day reimbursement window
+    by years, so ``date_sanity`` would — correctly, per policy — flag *every* receipt as
+    out-of-window. That is a policy signal, not a fraud-detector false positive, and it would
+    swamp the fused FP / AUC metric. Dropping it isolates what the content / structure detectors
+    (arithmetic, tax_id, duplicate, provenance) contribute on aged real data. In production the
+    60-day window is still enforced deterministically by ``date_sanity``.
+
+    (Before the window was tightened to 60 days, this instead pinned ``date_sanity`` to
+    ``max(date) + 1yr`` to keep it quiet — under a 2-month window no single ``today`` can silence
+    it across a multi-year corpus, so we simply exclude it here.)"""
+    return [d for d in default_detectors() if d.name != "date_sanity"]
 
 
 def _risks(rows: Sequence[list[Signal]], fuser: Fuser) -> list[float]:
@@ -67,6 +66,8 @@ def _threshold_for_recall(pos_scores: Sequence[float], recall: float) -> float:
     """Highest threshold whose recall over the positives is >= ``recall`` (the
     tightest cut for that sensitivity, i.e. the fewest false positives)."""
     s = sorted(pos_scores, reverse=True)
+    if not s:
+        return float("inf")  # no positives -> unreachable threshold -> 0 false positives
     k = max(1, min(len(s), math.ceil(recall * len(s))))
     return s[k - 1]
 
@@ -105,9 +106,6 @@ class FusionComparison:
     inactive: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
-        def f(x: float) -> str:
-            return "  n/a" if x != x else f"{x:5.3f}"
-
         corp = ", ".join(self.corpora) if self.corpora else "(none present)"
         lines = [
             "Learned fusion vs noisy-OR  (logistic over the same per-detector signals)",
@@ -122,10 +120,10 @@ class FusionComparison:
             "",
             f"{'separation (AUC)':30} {'noisy-OR':>9} {'learned':>9}",
             "-" * 50,
-            f"{'synthetic fraud vs synth-clean':30} {f(self.synth_auc_noisy):>9} "
-            f"{f(self.synth_auc_learned):>9}",
-            f"{'synthetic fraud vs REAL-legit':30} {f(self.real_auc_noisy):>9} "
-            f"{f(self.real_auc_learned):>9}",
+            f"{'synthetic fraud vs synth-clean':30} {_fmt(self.synth_auc_noisy):>9} "
+            f"{_fmt(self.synth_auc_learned):>9}",
+            f"{'synthetic fraud vs REAL-legit':30} {_fmt(self.real_auc_noisy):>9} "
+            f"{_fmt(self.real_auc_learned):>9}",
             "",
             "False-positive rate on real receipts at a matched synthetic fraud-recall:",
             f"  {'target recall':>14} {'noisy-OR FP':>12} {'learned FP':>12}",
@@ -133,7 +131,7 @@ class FusionComparison:
         ]
         for p in self.points:
             lines.append(
-                f"  {p.target_recall:>14.2f} {f(p.noisy_fp):>12} {f(p.learned_fp):>12}"
+                f"  {p.target_recall:>14.2f} {_fmt(p.noisy_fp):>12} {_fmt(p.learned_fp):>12}"
             )
         if self.weights:
             lines += [

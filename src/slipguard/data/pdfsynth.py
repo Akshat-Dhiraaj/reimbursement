@@ -28,12 +28,14 @@ from __future__ import annotations
 import io
 import random
 from datetime import date as Date
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
 
 from ..forensics.pdf import pikepdf_available
 from ..models import DocumentType, FraudType, LabeledSample, LineItem, Receipt
+from ._common import (VENDOR_NAMES, event_datetime, image_or_pdf_receipt,
+                      mismatched_modified, receipt_date)
 from .synth import Dataset
 
 _LEGIT_PRODUCERS = [
@@ -44,7 +46,6 @@ _EDITOR_PRODUCERS = [
     "Adobe Photoshop 24.1", "iLovePDF", "Smallpdf", "PDFescape",
     "Foxit PhantomPDF", "Sejda", "Canva",
 ]
-_VENDORS = ["Reliance Fresh", "Croma", "Apollo Pharmacy", "Cafe Coffee Day", "Big Bazaar"]
 #: Purchasable item names for the extraction corpus. Deliberately none contain a KIE
 #: summary keyword (subtotal/tax/total/cash/change/...), so every one is harvested as a
 #: line item and none is mistaken for a summary row.
@@ -303,13 +304,7 @@ def build_compressed_pdf(
 
 
 def _receipt(rng: random.Random, doc_id: str, path: Path, today: Date) -> Receipt:
-    return Receipt(
-        doc_id=doc_id,
-        vendor_name=rng.choice(_VENDORS),
-        date=today - timedelta(days=rng.randint(1, 180)),
-        source=DocumentType.PDF,
-        source_path=str(path),
-    )
+    return image_or_pdf_receipt(rng, doc_id, path, today, source=DocumentType.PDF)
 
 
 def _write(workdir: Path, doc_id: str, data: bytes) -> Path:
@@ -319,8 +314,7 @@ def _write(workdir: Path, doc_id: str, data: bytes) -> Path:
 
 
 def _issued_at(rng: random.Random, today: Date) -> datetime:
-    day = today - timedelta(days=rng.randint(1, 180))
-    return datetime(day.year, day.month, day.day, rng.randint(8, 20), rng.randint(0, 59))
+    return event_datetime(rng, today)
 
 
 def generate_pdf(
@@ -365,12 +359,12 @@ def generate_pdf(
 
     for _ in range(fraud_per_type):
         issued = _issued_at(rng, today)
-        modified = issued + timedelta(days=rng.randint(15, 400))
+        modified, gap = mismatched_modified(rng, issued)
         producer = rng.choice(_LEGIT_PRODUCERS)
         info = {"Producer": producer, "Creator": producer,
                 "CreationDate": _pdf_date(issued), "ModDate": _pdf_date(modified)}
         make(True, {FraudType.METADATA}, build_pdf(info),
-             {"mode": "date_mismatch", "gap_days": (modified - issued).days})
+             {"mode": "date_mismatch", "gap_days": gap})
 
     for _ in range(fraud_per_type):
         issued = _issued_at(rng, today)
@@ -473,12 +467,12 @@ def generate_pdf_deep(
     # mod-date well after creation, hidden in compressed metadata — Layer 1 blind
     for _ in range(fraud_per_type):
         issued = _issued_at(rng, today)
-        modified = issued + timedelta(days=rng.randint(15, 400))
+        modified, gap = mismatched_modified(rng, issued)
         producer = rng.choice(_LEGIT_PRODUCERS)
         info = {"Producer": producer, "Creator": producer,
                 "CreationDate": _pdf_date(issued), "ModDate": _pdf_date(modified)}
         make(True, {FraudType.METADATA}, build_compressed_pdf(info),
-             {"mode": "date_mismatch", "gap_days": (modified - issued).days, "compressed": True})
+             {"mode": "date_mismatch", "gap_days": gap, "compressed": True})
 
     # structural anomalies — clean producer/dates so the structure is the only signal
     for flag in ("javascript", "open_action", "acroform", "overlay"):
@@ -552,8 +546,8 @@ def generate_pdf_extraction(
 
         receipt = Receipt(
             doc_id=doc_id,
-            vendor_name=rng.choice(_VENDORS),
-            date=today - timedelta(days=rng.randint(1, 180)),
+            vendor_name=rng.choice(VENDOR_NAMES),
+            date=receipt_date(rng, today),
             currency="USD",
             country="US",
             line_items=items,

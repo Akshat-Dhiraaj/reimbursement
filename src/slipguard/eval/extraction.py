@@ -26,6 +26,7 @@ from ..detectors.duplicate import _norm_vendor  # alnum-lowercase normaliser (DR
 from ..extractors.base import Extractor
 from ..models import Receipt
 from ..money import money_close
+from .metrics import _fmt
 
 #: Receipt money fields scored numerically with a tolerance.
 _MONEY_FIELDS = ("subtotal", "tax_amount", "total")
@@ -100,10 +101,6 @@ class ExtractionReport:
             lines.append(f"{f.field:14} {f.n:>6} {f.correct:>8} {_fmt(f.accuracy):>9}")
         lines += ["-" * 40, f"{'OVERALL (macro)':30} {_fmt(self.overall):>9}"]
         return "\n".join(lines)
-
-
-def _fmt(x: float) -> str:
-    return "  n/a" if x != x else f"{x:5.3f}"
 
 
 def evaluate_extractor(extractor: Extractor, truths: Sequence[Receipt]) -> ExtractionReport:

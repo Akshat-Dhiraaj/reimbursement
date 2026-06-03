@@ -45,7 +45,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without the [web
         '    pip install -e ".[web]"'
     ) from exc
 
-from ..llm_validate import load_local_env, resolve_provider, validate
+from ..llm_validate import PROVIDERS, load_local_env, resolve_provider, validate
 
 #: Upload types we accept — the same set the validate pipeline can read (images + PDF).
 _ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".pdf"}
@@ -128,6 +128,7 @@ def _shape(verdict: dict, filename: Optional[str]) -> dict:
             "date_valid": verdict.get("date_valid"),
             "arithmetic_consistent": verdict.get("arithmetic_consistent"),
         },
+        "breakdown": verdict.get("_breakdown"),      # per-detector score x weight -> fused risk
         "provider": verdict.get("_provider"),
         "filename": filename,
         "verdict": verdict,                          # full raw verdict, for the curious / debugging
@@ -153,7 +154,10 @@ async def api_validate(
     file: UploadFile = File(...),
     provider: str = Form("auto"),
 ) -> JSONResponse:
-    """Validate one uploaded receipt/invoice. ``provider`` is ``auto`` | ``groq`` | ``gemini``."""
+    """Validate one uploaded receipt/invoice. ``provider`` is ``auto`` | ``groq`` | ``gemini`` | ``lmstudio``."""
+    if provider not in PROVIDERS:
+        raise HTTPException(status_code=400,
+                            detail=f"Unknown provider '{provider}'. Choose one of: {', '.join(PROVIDERS)}.")
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in _ALLOWED_SUFFIXES:
         raise HTTPException(

@@ -31,7 +31,8 @@ from typing import Optional, Sequence
 from ..llm_validate import _verdict_to_receipt, validate
 from ..models import Receipt
 from ..money import money_close
-from .extraction import _UNKNOWN_VENDORS, FieldAccuracy, _fmt, _money_ok, _vendor_ok
+from .extraction import _UNKNOWN_VENDORS, FieldAccuracy, _money_ok, _vendor_ok
+from .metrics import _fmt
 
 #: fields the validity prompt is asked to read (line items are out of scope → not scored).
 _PROMPT_FIELDS = ("vendor", "date", "subtotal", "tax_amount", "total")

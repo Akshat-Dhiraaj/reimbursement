@@ -180,6 +180,18 @@ def test_reconcile_never_downgrades_llm_reject():
     assert out["decision"] == "reject"
 
 
+def test_reconcile_adds_score_breakdown():
+    # the per-detector score x weight breakdown the web UI renders
+    bd = L.reconcile({"decision": "approve", "subtotal": 100.0, "tax": 10.0, "total": 999.0},
+                     "x.json")["_breakdown"]
+    assert {"risk_score", "review_at", "reject_at", "signals"} <= bd.keys()
+    names = {s["detector"] for s in bd["signals"]}
+    assert {"arithmetic", "date_sanity", "duplicate"}.issubset(names)
+    arith = next(s for s in bd["signals"] if s["detector"] == "arithmetic")
+    assert arith["abstained"] is False and arith["score"] > 0.5      # broken total -> high fraud score
+    assert 0.0 <= bd["risk_score"] <= 1.0
+
+
 def test_verdict_to_receipt_maps_fields():
     r = L._verdict_to_receipt({"vendor": "Croma", "date": "2026-01-10", "subtotal": 100.0,
                                "tax": 18.0, "total": 118.0, "service_charge": 5.0,

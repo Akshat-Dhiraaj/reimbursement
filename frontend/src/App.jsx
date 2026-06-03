@@ -219,6 +219,44 @@ function Verdict({ result, onReset }) {
         ))}
       </div>
 
+      {result.breakdown && (
+        <>
+          <h3>Score breakdown <span className="muted">(how the decision was reached)</span></h3>
+          <div className="breakdown">
+            <div className="bd-summary">
+              <span>Model (LLM): <strong>{result.llm_decision}</strong>{conf && ` · confidence ${conf}`}</span>
+              <span>
+                Deterministic risk <strong>{result.breakdown.risk_score}</strong> →{' '}
+                <strong>{result.deterministic_decision}</strong>
+                <span className="muted"> (approve &lt; {result.breakdown.review_at} ≤ review &lt;{' '}
+                  {result.breakdown.reject_at} ≤ reject)</span>
+              </span>
+            </div>
+            <table className="bd-table">
+              <thead>
+                <tr><th>detector</th><th>fraud&nbsp;score</th><th>weight</th><th>contribution</th><th>note</th></tr>
+              </thead>
+              <tbody>
+                {result.breakdown.signals.map((s, i) => (
+                  <tr key={i} className={s.abstained ? 'abstained' : ''}>
+                    <td>{s.detector}</td>
+                    <td>{s.abstained ? '—' : s.score.toFixed(2)}</td>
+                    <td>{s.abstained ? 'abstained' : s.weight.toFixed(2)}</td>
+                    <td>{s.abstained ? '—' : s.contribution.toFixed(2)}</td>
+                    <td className="bd-note-cell">{s.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="muted bd-note">
+              Risk = noisy-OR of the weighted contributions (score × weight); an abstaining
+              detector (weight 0) can’t move it. The final decision shown above is the{' '}
+              <strong>stricter</strong> of the model’s and this deterministic score.
+            </p>
+          </div>
+        </>
+      )}
+
       <div className="decisions muted">
         Model said <strong>{result.llm_decision}</strong>
         {result.deterministic_decision &&

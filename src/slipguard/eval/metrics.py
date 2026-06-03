@@ -5,6 +5,12 @@ from __future__ import annotations
 from typing import Sequence
 
 
+def _fmt(x: float) -> str:
+    """Fixed-width 3-decimal float for the eval report tables; NaN -> a right-aligned 'n/a'.
+    Shared by every report __str__ (harness / extraction / prompt_eval / fusion_bench)."""
+    return "  n/a" if x != x else f"{x:5.3f}"
+
+
 def confusion(preds: Sequence[bool], labels: Sequence[bool]) -> tuple[int, int, int, int]:
     tp = fp = tn = fn = 0
     for p, y in zip(preds, labels):

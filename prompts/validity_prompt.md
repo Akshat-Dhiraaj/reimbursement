@@ -18,9 +18,10 @@ Check ALL of the following:
    **IMPORTANT — be honest:** pixel-level AI-edit detection is *not* reliable. Treat any such sign
    as a reason to **review**, never as proof. Describe what you observe; do not fabricate a verdict.
 
-2. **Date.** Extract the transaction date. Flag if it is: missing; **in the future**; implausibly
-   old (more than ~1 year for a reimbursement); inconsistent with the vendor/content; or in an
-   ambiguous or altered-looking format.
+2. **Date.** Extract the transaction date. Flag if it is: missing; **in the future**; impossible or
+   inconsistent with the vendor/content; or in an ambiguous or altered-looking format. (How *recent*
+   a receipt must be — the reimbursement submission window — is enforced separately by a deterministic
+   check, so you need not judge whether an otherwise-valid date is simply "too old".)
 
 3. **Arithmetic.** If line items, subtotal, tax and total are visible, check they reconcile:
    `subtotal = sum(line items)` and `total = subtotal + tax + service_charge − discount`.

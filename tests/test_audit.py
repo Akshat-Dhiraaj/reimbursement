@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 from slipguard.detectors import default_detectors
 from slipguard.detectors.arithmetic import ArithmeticConsistencyDetector
@@ -11,7 +11,7 @@ from slipguard.models import DocumentType, LineItem, Receipt
 
 def _clean(doc_id: str, total: float = 130.0) -> Receipt:
     items = [LineItem("A", 2, 50.0, 100.0), LineItem("B", 1, 30.0, 30.0)]
-    return Receipt(doc_id, "Croma", date(2026, 1, 10),
+    return Receipt(doc_id, "Croma", date.today() - timedelta(days=5),   # recent -> within the date window
                    line_items=items, subtotal=130.0, total=total)
 
 

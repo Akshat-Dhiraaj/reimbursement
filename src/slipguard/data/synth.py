@@ -24,6 +24,7 @@ from typing import Optional
 from stdnum.in_ import gstin
 
 from ..models import FraudType, LabeledSample, LineItem, Receipt
+from ._common import receipt_date
 
 _ALNUM = string.digits + string.ascii_uppercase
 
@@ -98,9 +99,8 @@ def _clean_receipt(rng: random.Random, doc_id: str, today: Date) -> Receipt:
     subtotal = round(sum(li.amount for li in items), 2)
     tax = round(vendor.tax_rate * subtotal, 2)
     total = round(subtotal + tax, 2)
-    receipt_date = today - timedelta(days=rng.randint(1, 180))
     return Receipt(
-        doc_id=doc_id, vendor_name=vendor.name, date=receipt_date,
+        doc_id=doc_id, vendor_name=vendor.name, date=receipt_date(rng, today),
         currency="INR", country="IN", vendor_tax_id=_make_valid_gstin(rng, vendor.state),
         line_items=items, subtotal=subtotal, tax_rate=vendor.tax_rate,
         tax_amount=tax, total=total,

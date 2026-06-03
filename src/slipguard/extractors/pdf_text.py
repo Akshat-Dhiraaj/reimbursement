@@ -30,11 +30,10 @@ text layer.
 
 from __future__ import annotations
 
-import importlib.util
 from typing import Optional
 
 from ..models import DocumentType, Receipt
-from .base import Extractor
+from .base import Extractor, importable
 from .kie import Line, receipt_from_lines
 
 
@@ -70,7 +69,7 @@ class PdfTextExtractor(Extractor):
     handles = (DocumentType.PDF,)
 
     def available(self) -> tuple[bool, str]:
-        if importlib.util.find_spec("pypdfium2") is None:
+        if not importable("pypdfium2"):
             return False, 'missing dep: pypdfium2 — pip install -e ".[pdf]"'
         return True, ""
 

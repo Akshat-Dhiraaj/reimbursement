@@ -10,7 +10,7 @@ from ..data.synth import Dataset
 from ..detectors.base import Detector
 from ..fusion import Fuser
 from ..models import Decision, FraudType
-from .metrics import false_positive_rate, precision_recall_f1, roc_auc
+from .metrics import _fmt, false_positive_rate, precision_recall_f1, roc_auc
 
 
 @dataclass
@@ -69,10 +69,6 @@ class Report:
             + ", ".join(f"{k}={_fmt(v)}" for k, v in f.subtype_recall.items()),
         ]
         return "\n".join(lines)
-
-
-def _fmt(x: float) -> str:
-    return "  n/a" if x != x else f"{x:5.3f}"
 
 
 def evaluate(

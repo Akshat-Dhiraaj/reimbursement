@@ -6,6 +6,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Iterable, Optional
 
+from ..combine import noisy_or
 from ..models import DocumentType, FraudType, Receipt, Signal
 
 
@@ -39,3 +40,12 @@ class Detector(ABC):
 
     def _abstain(self, reason: str) -> Signal:
         return Signal(detector=self.name, score=0.0, confidence=0.0, reasons=[reason])
+
+    def _fused(self, parts: list[tuple[float, str]], confidence: float,
+               evidence: Optional[dict] = None) -> Signal:
+        """A *fired* Signal from corroborating ``(weight, reason)`` parts: combined by noisy-OR
+        (so they compound, mirroring the verdict fuser) and capped below 1.0 — a single detector's
+        evidence is never stated as certainty. ``parts`` must be non-empty. Shared by the
+        provenance detectors (``pdf_meta`` / ``image_meta``)."""
+        risk = min(0.99, noisy_or(s for s, _ in parts))
+        return Signal(self.name, risk, confidence, [r for _, r in parts], evidence or {})

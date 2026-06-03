@@ -4,7 +4,8 @@ __pycache__/
 *.egg-info/
 .eggs/
 build/
-/dist/            # anchored to root (the Python build output) so the committed frontend/dist is kept
+# anchored to root (the Python build output) so the committed frontend/dist is kept
+/dist/
 .venv/
 venv/
 env/
@@ -23,6 +24,8 @@ htmlcov/
 !/data/demo.json
 /artifacts/
 /datasets/
+# generated tampered receipts (regenerate with `slipguard make-fakes`; -f to commit a subset)
+/fakes/
 *.ckpt
 *.pt
 *.onnx

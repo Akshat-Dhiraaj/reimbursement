@@ -1,5 +1,6 @@
-"""Date sanity — a receipt cannot be dated in the future, and very old dates are
-mildly suspicious. ``today`` is injectable so tests are deterministic."""
+"""Date sanity — a receipt cannot be dated in the future, and one older than the reimbursement
+submission window (default 60 days ~ 2 months) is out of policy and flagged for review. ``today``
+is injectable so tests and audits are deterministic."""
 
 from __future__ import annotations
 
@@ -14,7 +15,9 @@ class DateSanityDetector(Detector):
     name = "date_sanity"
     targets = frozenset({FraudType.DATE})
 
-    def __init__(self, today: Optional[Date] = None, max_age_days: int = 1825):
+    def __init__(self, today: Optional[Date] = None, max_age_days: int = 60):
+        # max_age_days = the reimbursement submission window; a receipt older than this is
+        # out of policy (default 60 days ~ 2 months). Injectable for stricter/looser policies.
         self._today = today
         self.max_age_days = max_age_days
 
@@ -37,10 +40,13 @@ class DateSanityDetector(Detector):
 
         age = (today - r.date).days
         if age > self.max_age_days:
-            return Signal(self.name, score=0.6, confidence=0.6,
+            # Out of the reimbursement window -> flag for review (0.7 x 0.75 = 0.525 weighted,
+            # past the 0.4 review threshold but below auto-reject; a late receipt may still get a
+            # policy exception, so a human looks).
+            return Signal(self.name, score=0.7, confidence=0.75,
                           reasons=[f"date {r.date.isoformat()} is {age}d old "
-                                   f"(> {self.max_age_days})"],
+                                   f"(> {self.max_age_days}-day reimbursement window)"],
                           evidence={"age_days": age})
 
         return Signal(self.name, score=0.03, confidence=0.85,
-                      reasons=[f"date {r.date.isoformat()} is plausible"])
+                      reasons=[f"date {r.date.isoformat()} is within the {self.max_age_days}-day window"])
