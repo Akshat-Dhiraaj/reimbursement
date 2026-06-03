@@ -12,7 +12,8 @@ pixel-level AI-edit detection is a *triage cue, not forensic proof* (see SCORECA
 
 Deps (lazy-imported): Pillow (`[vlm]`) for image downscale, pypdfium2 (`[pdf]`) to rasterise PDFs for
 the image-only providers. A network + key are needed for the hosted providers; LM Studio is local:
-  * Groq   — `GROQ_API_KEY`   (OpenAI-compatible; default model meta-llama/llama-4-scout-17b-16e-instruct)
+  * Groq   — `GROQ_API_KEY` (+ optional `GROQ_API_KEY_2`, `_3`, … — auto-fallback when one hits its
+    rate/daily limit; OpenAI-compatible; default model meta-llama/llama-4-scout-17b-16e-instruct)
   * Gemini — `GEMINI_API_KEY` or `GOOGLE_API_KEY` (default model gemini-flash-latest; accepts PDFs directly)
   * LM Studio — a LOCAL OpenAI-compatible server (provider `lmstudio`): no API key, no quota/rate
     limit, fully private. Pass `--model` a loaded **vision** model (e.g. qwen/qwen3.5-9b); base URL via
@@ -145,14 +146,45 @@ def _openai_vision_content(prompt: str, parts: list[tuple[bytes, str]]) -> list:
     return content
 
 
+def _numbered_keys(base: str) -> list[str]:
+    """A provider's API keys in fallback order: ``BASE``, then ``BASE_2``, ``BASE_3``, … — so a
+    second key automatically takes over when the first hits its rate / daily limit. Empty if none."""
+    keys: list[str] = []
+    primary = os.environ.get(base)
+    if primary:
+        keys.append(primary)
+    i = 2
+    while os.environ.get(f"{base}_{i}"):
+        keys.append(os.environ[f"{base}_{i}"])
+        i += 1
+    return keys
+
+
 def _call_groq(prompt: str, parts: list[tuple[bytes, str]], model: Optional[str]) -> str:
+    keys = _numbered_keys("GROQ_API_KEY")
+    if not keys:
+        raise KeyError("GROQ_API_KEY")           # api.py maps a missing key to a clear 503
     body = {"model": model or _GROQ_MODEL, "temperature": 0, "max_tokens": 1024,
             "messages": [{"role": "user", "content": _openai_vision_content(prompt, parts)}]}
-    out = _post_json(_GROQ_URL, body, {
-        "Authorization": "Bearer " + os.environ["GROQ_API_KEY"],
-        "Content-Type": "application/json", "User-Agent": _UA,
-    })
-    return out["choices"][0]["message"]["content"]
+    last: Optional[BaseException] = None
+    for n, key in enumerate(keys):
+        is_last = n == len(keys) - 1
+        try:
+            # Rotate to the next key FAST on a rate-limited / exhausted key (retries=0); only the
+            # last key absorbs the capped backoff, so a momentary all-keys-throttled minute still
+            # rides out instead of giving up early.
+            out = _post_json(
+                _GROQ_URL, body,
+                {"Authorization": "Bearer " + key, "Content-Type": "application/json", "User-Agent": _UA},
+                retries=4 if is_last else 0,
+            )
+            return out["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503) and not is_last:
+                last = e
+                continue                          # this key is out — try the next GROQ_API_KEY_n
+            raise
+    raise last  # pragma: no cover - the loop returns or raises above
 
 
 def _call_lmstudio(prompt: str, parts: list[tuple[bytes, str]], model: Optional[str]) -> str:

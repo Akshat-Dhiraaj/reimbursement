@@ -1,0 +1,25 @@
+# slipguard — pinned runtime dependencies to RUN the app (web UI + validate pipeline).
+#
+# pyproject.toml is the SOURCE OF TRUTH for dependencies (with optional extras). This file is the
+# pinned runtime set so `pip install -r requirements.txt` reproduces a working install of the
+# web/validate app on a fresh machine or virtualenv.
+#
+# Equivalent intent:  pip install -e ".[web]"  + Pillow/pypdfium2 for full image *and* PDF support.
+# Versions are pinned (==) to the known-good set this was verified on.
+#
+# NOT included (heavy / optional — install from pyproject only when needed):
+#   [vlm] torch+transformers (local Qwen VLM)   [ocr] docTR   [dspy] DSPy   [c2pa] c2pa-python
+#   [pdf-forensics] pikepdf   [dev] pytest
+# e.g.:  pip install -e ".[vlm]"     or     pip install -e ".[dev]"
+
+# --- core (always required) ---
+python-stdnum==2.2          # GSTIN / VAT validation for the tax-id detector + cross-check
+
+# --- web UI backend (the [web] extra) ---
+fastapi==0.135.3
+uvicorn[standard]==0.44.0
+python-multipart==0.0.26    # multipart form uploads for POST /api/validate
+
+# --- image + PDF handling for the validate pipeline ---
+pillow==12.2.0              # downscale an image before the model call (falls back to raw bytes if absent)
+pypdfium2==5.8.0            # rasterise PDF pages for image-only providers (Groq / LM Studio)

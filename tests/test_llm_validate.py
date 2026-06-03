@@ -102,6 +102,39 @@ def test_validate_dispatches_to_lmstudio(monkeypatch, tmp_path):
     assert v["decision"] == "approve" and v["_provider"] == "lmstudio"   # routed to the local caller
 
 
+# --- Groq multi-key fallback (rotate when one hits its rate/daily limit) ------
+
+def test_numbered_keys_fallback_order(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "k1")
+    monkeypatch.setenv("GROQ_API_KEY_2", "k2")
+    monkeypatch.delenv("GROQ_API_KEY_3", raising=False)
+    assert L._numbered_keys("GROQ_API_KEY") == ["k1", "k2"]
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY_2", raising=False)
+    assert L._numbered_keys("GROQ_API_KEY") == []
+
+
+def test_call_groq_rotates_to_second_key_on_429(monkeypatch):
+    import urllib.error
+    monkeypatch.setenv("GROQ_API_KEY", "k1")
+    monkeypatch.setenv("GROQ_API_KEY_2", "k2")
+    monkeypatch.delenv("GROQ_API_KEY_3", raising=False)
+    seen = []
+
+    def fake_post(url, body, headers, timeout=90.0, retries=4):
+        key = headers["Authorization"].split()[-1]
+        seen.append((key, retries))
+        if key == "k1":
+            raise urllib.error.HTTPError(url, 429, "rate limit", {}, None)   # first key is out
+        return {"choices": [{"message": {"content": '{"decision":"approve"}'}}]}
+
+    monkeypatch.setattr(L, "_post_json", fake_post)
+    out = L._call_groq("p", [], None)
+    assert out == '{"decision":"approve"}'
+    assert [k for k, _ in seen] == ["k1", "k2"]          # rotated to the 2nd key
+    assert seen[0][1] == 0 and seen[1][1] == 4           # non-last fast (retries=0); last backs off
+
+
 # --- the deterministic cross-check refinement (#85) --------------------------
 
 def test_reconcile_escalates_on_broken_arithmetic():
