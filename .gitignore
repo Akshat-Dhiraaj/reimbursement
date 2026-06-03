@@ -4,7 +4,7 @@ __pycache__/
 *.egg-info/
 .eggs/
 build/
-dist/
+/dist/            # anchored to root (the Python build output) so the committed frontend/dist is kept
 .venv/
 venv/
 env/
@@ -33,10 +33,10 @@ htmlcov/
 .env.*
 !.env.example
 
-# Frontend (web UI) — Node toolchain artifacts; the React source under frontend/src is tracked.
+# Frontend (web UI) — ignore the Node toolchain only. The React source (frontend/src) AND the built
+# frontend/dist are tracked, so a fresh `git clone` serves the UI with no Node/npm install needed.
 node_modules/
 frontend/node_modules/
-frontend/dist/
 
 # OS / editor
 .DS_Store
