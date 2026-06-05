@@ -199,7 +199,8 @@ def test_reconcile_adds_score_breakdown():
                      "x.json")["_breakdown"]
     assert {"risk_score", "review_at", "reject_at", "signals"} <= bd.keys()
     names = {s["detector"] for s in bd["signals"]}
-    assert {"arithmetic", "date_sanity", "duplicate"}.issubset(names)
+    assert {"arithmetic", "date_sanity"}.issubset(names)
+    assert "duplicate" not in names   # relational: disabled in the live path until a backend is wired
     arith = next(s for s in bd["signals"] if s["detector"] == "arithmetic")
     assert arith["abstained"] is False and arith["score"] > 0.5      # broken total -> high fraud score
     assert 0.0 <= bd["risk_score"] <= 1.0

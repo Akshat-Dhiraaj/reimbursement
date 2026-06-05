@@ -10,6 +10,35 @@ The scorecard makes "provably can't" concrete.
 
 ---
 
+## What actually runs in the deployed product (honest status)
+
+The benchmarks here measure *capabilities*. This is the separate, blunter question — **which of them
+are wired into the live web UI / `validate` path, and which are demonstrated-but-not-deployed.** The
+live path is `reconcile()`: the LLM judge's verdict, cross-checked by the deterministic detectors
+(`deployed_detectors()`) fused with the hand-rolled noisy-OR `Fuser`.
+
+| Capability | Live in the web UI / `validate`? | Notes |
+|---|---|---|
+| LLM judge (Groq / Gemini / LM Studio) | ✅ yes | needs an API key (or a local LM Studio model). The core. |
+| `arithmetic` cross-check | ✅ yes | reconciles the LLM's *own* numbers. **Caveat:** the low-confidence *abstain guard* is inert here — the LLM path sets no per-field confidence, so arithmetic always asserts (the measured "extraction-misread FP" risk). |
+| `tax_id` (GSTIN / VAT checksum) | ✅ yes | fires only when the LLM extracts a tax-id and the country is India or EU; abstains otherwise. |
+| `date_sanity` (future / > 60-day) | ✅ yes | — |
+| `pdf_meta` (PDF route) | ⚠️ partial | the dependency-free **byte layer** runs on the uploaded PDF; the **deep layer** (editor tag / structure on compressed PDFs) needs the `[pdf-forensics]` extra (pikepdf). |
+| `image_meta` (image route) | ⚠️ extra-gated | does nothing without `[vlm]` (Pillow → EXIF) and/or `[c2pa]`; *abstains cleanly* when they're absent (no false signal). |
+| **`duplicate` / resubmission** | ❌ **disabled** | RELATIONAL — needs a persistent store of prior submissions. None is wired, so it's excluded from `deployed_detectors()` (un-primed it would report "no match" *without ever checking*). Backend design in ROADMAP.md. Logic + benchmark stand ready. |
+| noisy-OR fuser + UI score breakdown | ✅ yes | — |
+| multi-key + cross-provider fallback | ✅ yes | needs the keys. |
+| **Learned / calibrated fuser** (M3) | ❌ benchmark-only | the live path uses the hand-rolled noisy-OR `Fuser`; `LearnedFuser` is only exercised by `eval-fusion`. Deploying it needs a *trained-on-real-data* weight set (we have only synthetic-fraud-vs-real-legit separation). |
+| Heavy extractors (Qwen-VL / docTR / pypdfium2 / Groq-VL) | ❌ not in this path | they power the `eval-extract` / `score` / `eval-real` **benchmarks**; the web / `validate` flow uses the LLM judge's *own* inline extraction, so these never run there. |
+
+**Bottom line:** the deployed product is the **LLM judge + arithmetic / tax-id / date deterministic
+cross-check + PDF byte-forensics**, plus EXIF/C2PA image-forensics *if* the extras are installed.
+**Resubmission/duplicate detection and the learned fuser are built and benchmarked but not deployed** —
+each needs an external dependency the product can't assume yet (a submission-history DB; a
+real-fraud-labelled training set).
+
+---
+
 ## The three paradigms
 
 They are three sources of "intelligence," and the honest axes underneath are **capability

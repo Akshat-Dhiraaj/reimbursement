@@ -16,6 +16,46 @@ Status as of 2026-06-02. Rationale for the choices below lives in
 
 ---
 
+## Deployment gaps — built & benchmarked, not yet wired into the live product
+
+A sanity pass over *what actually runs in the deployed web UI / `validate` path* (the full matrix is in
+[SCORECARD.md](SCORECARD.md)). Two capabilities are demonstrated and benchmarked but **not deployed**,
+each because it needs an external dependency the product can't assume yet:
+
+### 1. Resubmission / duplicate detection — needs a submission-history backend (lightweight design)
+
+`DuplicateDetector` is **relational**: it compares a receipt against PRIOR submissions, so it only
+works when `prime()`-d with history. The benchmark supplies a synthetic history; the live product has
+none, so duplicate is excluded from `deployed_detectors()` (un-primed it would report "no match"
+without ever checking, and it now abstains in that state). To deploy it, add a small persistent
+**submission store** — free and dependency-light:
+
+- **SQLite** (stdlib `sqlite3`, one file, no server — runs on the no-GPU work laptop). Schema:
+  `submissions(doc_id, vendor, date, total, file_sha256, phash, created_at)`, indexed on
+  `(vendor, date)` and `file_sha256`.
+- **Per submission:** (1) compute `file_sha256` (catches byte-identical re-uploads instantly) and a
+  perceptual hash `phash` (catches re-screenshot / re-encode where bytes differ); (2) load priors by
+  `(vendor, date)` + hashes → `prime()` the detector (or query it directly); (3) on accept, `INSERT`
+  the row.
+- **Wire point:** a `SubmissionStore` with `prior(receipt) -> list[Receipt]` + `record(receipt, file)`;
+  `reconcile()` / the web backend call `prior()` to prime and `record()` on accept, and `"duplicate"`
+  is removed from `_NEEDS_HISTORY_BACKEND` so it re-enters `deployed_detectors()`.
+- **Production swap:** the same schema drops onto **Postgres** for the real IQline deployment (the
+  IQline Postgres instance already exists) — SQLite is the portable/free default; Postgres for scale.
+- **Caveat:** the synthetic duplicate recall (1.0) will NOT transfer until it's measured on *real*
+  repeat submissions. Also adds a perceptual-hash signal for re-photographed copies (the seam the
+  detector docstring already reserves).
+
+### 2. Learned / calibrated fuser — needs a real-fraud-trained weight set
+
+The live path uses the hand-rolled noisy-OR `Fuser`; `LearnedFuser` is only run by `eval-fusion`. It
+beat noisy-OR on real FP (**0.175 → 0.042**) but on *synthetic-fraud-vs-real-legit* separation, not
+real-fraud detection. Deploying it means training its weights on a real fraud-labelled corpus (the
+same blocker as the headline real-positives gap below), then swapping `Fuser` → `LearnedFuser` in
+`reconcile()`.
+
+---
+
 ## ✅ Done (with evidence)
 
 **M1 — deterministic layer.**

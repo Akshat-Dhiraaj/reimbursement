@@ -61,6 +61,13 @@ never the gate**.
 | Image *pixel* forensics (AI-generated, tamper-localization) | ❌ Deferred (#60) — research-confirmed low ROI (FFT/ELA/PRNU collapse under recompression); lightweight provenance used instead | declared in label space only |
 | Real *fraud* corpora (positives) | ❌ Not started | data gap — real receipt sets are legitimate-only (see DECISIONS) |
 
+**What's live vs benchmarked:** the deployed web UI / `validate` path runs the **LLM judge +
+deterministic cross-check** (`arithmetic`, `tax_id`, `date_sanity`, PDF byte-forensics; EXIF/C2PA
+image-forensics with the extras). Two capabilities are built and benchmarked but **not yet wired into
+the live path**: **`duplicate` / resubmission** (relational — needs a persistent submission-history
+backend; a lightweight SQLite design is in [ROADMAP.md](ROADMAP.md)) and the **learned fuser** (needs
+real-fraud-trained weights). Full matrix: [SCORECARD.md](SCORECARD.md).
+
 **Honest caveat:** the synthetic benchmark scores ~1.0 AUC, but that only validates
 the *harness and detector logic* on fraud that violates these exact rules. It says
 nothing about real-world / AI-generated fraud. See §5.

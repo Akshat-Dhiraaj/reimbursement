@@ -614,6 +614,23 @@ lazy (consistent with its other in-function imports), so the module loads stdlib
 in any order; a **subprocess** regression test now imports in uvicorn's order (pytest's shared interpreter can't
 catch import-order cycles). **269 tests pass.**
 
+### Duplicate detection disabled in production + production-functionality audit
+`duplicate` is RELATIONAL — it compares a receipt against PRIOR submissions, so it needs a persistent
+store, which isn't wired. Un-primed it returned *"no matching prior submission"* (confidence 0.6) — a
+check that never actually ran. Added **`detectors.deployed_detectors()`** = `default_detectors()` minus
+the relational set `_NEEDS_HISTORY_BACKEND = {"duplicate"}`; **`reconcile()` and the CLI `score`** now
+use it, so the live web/`validate` path excludes duplicate. `DuplicateDetector.score()` also now
+**abstains when un-primed** (never asserts "no duplicate" without a history). `default_detectors()` and
+the benchmark are unchanged — the harness primes with synthetic history, so duplicate is still measured
+at recall 1.0. A **sanity pass over every feature** (full matrix in SCORECARD.md) separated *live* from
+*benchmark-only*: **live** = LLM judge + `arithmetic`/`tax_id`/`date_sanity` + `pdf_meta` byte layer (+
+`image_meta` / pdf deep layer only with the `[vlm]`/`[c2pa]`/`[pdf-forensics]` extras); **not deployed**
+= `duplicate` (needs backend), the `LearnedFuser` (the live path uses the hand-rolled noisy-OR `Fuser`;
+learned is `eval-fusion`-only, needs real-fraud-trained weights), and the heavy extractors (validate
+uses the LLM's *own* inline extraction, not VLM/docTR/pdf_text/groq). Also noted: the `arithmetic`
+abstain guard is inert on the LLM path (it sets no `field_confidence`). Lightweight free backend design
+(SQLite `SubmissionStore`, SHA-256 + perceptual hash, Postgres-swappable for IQline) is in ROADMAP.md.
+
 ## 4. Quickstart
 
 ```bash

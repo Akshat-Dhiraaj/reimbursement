@@ -94,7 +94,7 @@ from typing import Optional, Sequence
 from .data.imagesynth import generate_image
 from .data.pdfsynth import generate_pdf, generate_pdf_deep, generate_pdf_extraction
 from .data.synth import generate
-from .detectors import default_detectors
+from .detectors import default_detectors, deployed_detectors
 from .detectors.base import Detector
 from .detectors.datesanity import DateSanityDetector
 from .detectors.pdfmeta import PdfMetadataDetector
@@ -494,7 +494,9 @@ def cmd_score(args: argparse.Namespace) -> None:
             + (f" ({skips})" if skips else " — pass a structured receipt JSON for now")
         )
     receipt = extractor.extract(args.path, doc_id=args.path)
-    verdict = Fuser().verdict(receipt.doc_id, [d.run(receipt) for d in default_detectors()])
+    # deployed_detectors(): a one-shot CLI score has no prior-submission history, so the relational
+    # duplicate detector is excluded (it needs a backend — see ROADMAP).
+    verdict = Fuser().verdict(receipt.doc_id, [d.run(receipt) for d in deployed_detectors()])
     print(f"doc {verdict.doc_id}: risk={verdict.risk_score:.3f} -> {verdict.decision.value.upper()}")
     for reason in verdict.reasons:
         print(f"  - {reason}")

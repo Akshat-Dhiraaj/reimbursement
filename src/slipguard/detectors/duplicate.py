@@ -3,7 +3,12 @@
 Relational, so it is ``prime``-d with prior submissions (history). Catches exact
 re-submissions by (vendor, date, total) and near-duplicates via fuzzy vendor +
 same date + matching amount. Perceptual-hash image matching plugs in here later
-for re-photographed copies."""
+for re-photographed copies.
+
+**Production status:** needs a persistent store of prior submissions to compare against. Until that
+backend is configured it is EXCLUDED from the live path (``detectors.deployed_detectors``) and
+abstains if ever run un-primed. The logic + benchmark (with a synthetic history corpus) stand ready;
+a lightweight SQLite design is in ROADMAP.md / SCORECARD.md."""
 
 from __future__ import annotations
 
@@ -46,6 +51,12 @@ class DuplicateDetector(Detector):
 
     def score(self, receipt: Receipt) -> Signal:
         r = receipt
+        if not self._exact and not self._items:
+            # Not prime()-d with any prior submissions -> nothing to compare against, so ABSTAIN
+            # rather than assert "no duplicate" (which would imply a check that never ran). In the
+            # live product this detector is disabled entirely until a submission-history backend is
+            # configured (see detectors.deployed_detectors / ROADMAP).
+            return self._abstain("no submission history to compare against (needs a backend)")
         if r.total is None:
             return self._abstain("no total to match on")
 

@@ -325,10 +325,13 @@ def reconcile(verdict: dict, path: str) -> dict:
     arithmetic doesn't reconcile, the date is impossible, or a tax-id fails its checksum. It NEVER
     relaxes the LLM decision. Dependency-free (heavy provenance detectors abstain if their extras
     are absent); this patches the measured 'confident arithmetic misread' weakness for free."""
-    from .detectors import default_detectors
+    from .detectors import deployed_detectors
     from .fusion import Fuser
     fuser = Fuser()
-    signals = [d.run(_verdict_to_receipt(verdict, path)) for d in default_detectors()]
+    # deployed_detectors() excludes the relational duplicate detector: a single uploaded receipt has
+    # no prior-submission history to compare against, so resubmission detection needs a persistent
+    # backend that isn't configured yet (see ROADMAP / SCORECARD for the lightweight SQLite design).
+    signals = [d.run(_verdict_to_receipt(verdict, path)) for d in deployed_detectors()]
     det = fuser.verdict(path, signals)
     llm_decision = verdict.get("decision", "review")
     verdict["llm_decision"] = llm_decision
